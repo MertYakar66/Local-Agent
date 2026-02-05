@@ -1,0 +1,60 @@
+[project]
+name = "autonomous-browser-agent"
+version = "0.1.0"
+description = "Vision-driven autonomous browser agent with multi-tab support and human-in-the-loop controls"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "playwright>=1.45.0",
+    "langchain-ollama>=0.1.0",
+    "streamlit>=1.35.0",
+    "chromadb>=0.5.0",
+    "pillow>=10.0.0",
+    "loguru>=0.7.0",
+    "pydantic>=2.0.0",
+    "aiohttp>=3.9.0",
+    "httpx>=0.27.0",
+    "python-dotenv>=1.0.0",
+    "numpy>=1.26.0",
+    "imagehash>=4.3.0",
+    "sentence-transformers>=2.7.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0.0",
+    "pytest-asyncio>=0.23.0",
+    "pytest-cov>=4.0.0",
+    "black>=24.0.0",
+    "ruff>=0.3.0",
+    "mypy>=1.8.0",
+]
+
+[project.scripts]
+browser-agent = "src.main:main"
+browser-agent-ui = "src.ui.streamlit_app:run"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.mypy]
+python_version = "3.11"
+strict = true
+ignore_missing_imports = true
+
+[tool.black]
+line-length = 100
+target-version = ["py311"]

@@ -1,0 +1,106 @@
+version: '3.8'
+
+# Vision-driven Autonomous Browser Agent
+# Optimized for AMD Ryzen 9800X3D + RTX 4080 Super (16GB VRAM) + 64GB DDR5
+
+services:
+  browser-agent:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    image: autonomous-browser-agent:latest
+    container_name: browser-agent
+
+    # GPU passthrough for Ollama inference
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+
+    environment:
+      - NVIDIA_VISIBLE_DEVICES=all
+      - NVIDIA_DRIVER_CAPABILITIES=compute,utility
+      - DISPLAY=:99
+      - OLLAMA_URL=http://host.docker.internal:11434
+      - HEADLESS=true
+      - LOG_LEVEL=INFO
+      - MAX_TABS=10
+
+    volumes:
+      # Read-only code mount
+      - ../src:/app/src:ro
+      # Writable log directory
+      - ../logs:/app/logs:rw
+      # ChromaDB storage
+      - ../data:/app/data:rw
+      # X11 socket for display (if needed)
+      - /tmp/.X11-unix:/tmp/.X11-unix:rw
+
+    # Security options
+    security_opt:
+      - seccomp:./seccomp_profile.json
+
+    # Run as non-root user
+    user: "1000:1000"
+
+    # Required for Chromium stability
+    ipc: host
+
+    # Shared memory for browser (prevents crashes)
+    shm_size: 2gb
+
+    # Memory limits (prevent runaway usage)
+    mem_limit: 8g
+    memswap_limit: 10g
+
+    # Network configuration
+    network_mode: bridge
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+
+    ports:
+      - "8501:8501"   # Streamlit dashboard
+      - "9222:9222"   # Chrome DevTools Protocol (optional)
+
+    # Restart policy
+    restart: unless-stopped
+
+    # Health check
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8501/_stcore/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+
+  # Optional: Local Ollama service (if not running on host)
+  ollama:
+    image: ollama/ollama:latest
+    container_name: ollama
+    profiles:
+      - with-ollama
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    volumes:
+      - ollama_data:/root/.ollama
+    ports:
+      - "11434:11434"
+    environment:
+      - NVIDIA_VISIBLE_DEVICES=all
+    restart: unless-stopped
+
+volumes:
+  ollama_data:
+    driver: local
+
+networks:
+  default:
+    name: browser-agent-network
