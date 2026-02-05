@@ -318,10 +318,25 @@ class AgentOrchestrator:
                 logger.info(f"[Step {step.step}] {step.description}")
                 step.status = "in_progress"
 
+                # Get current screenshot for UI before step execution
+                try:
+                    tab_id = step.tab if step.tab >= 0 else self.tab_manager.active_tab_id or 0
+                    if tab_id in self.tab_manager.tabs:
+                        pre_screenshot = await self.tab_manager.get_tab_screenshot(tab_id)
+                        tab_states = await self.tab_manager.get_all_tab_states()
+                    else:
+                        pre_screenshot = None
+                        tab_states = {}
+                except Exception:
+                    pre_screenshot = None
+                    tab_states = {}
+
                 self._update_status({
                     "stage": "executing",
                     "current_step": step.to_dict(),
                     "progress": f"{step_index + 1}/{len(plan.steps)}",
+                    "screenshot": pre_screenshot,
+                    "tabs": tab_states,
                 })
 
                 # Execute step with retry logic
@@ -499,6 +514,19 @@ class AgentOrchestrator:
                     await self.tab_manager.navigate(tab_id, step.target)
                     tab_state = await self.tab_manager.get_tab_state(tab_id)
 
+                    # Send screenshot and tab update after navigation
+                    try:
+                        nav_screenshot = await self.tab_manager.get_tab_screenshot(tab_id)
+                        tab_states = await self.tab_manager.get_all_tab_states()
+                        self._update_status({
+                            "stage": "navigated",
+                            "screenshot": nav_screenshot,
+                            "tabs": tab_states,
+                            "current_url": tab_state.current_url,
+                        })
+                    except Exception:
+                        pass
+
                     # Verify navigation
                     if step.target.lower() in tab_state.current_url.lower():
                         return {
@@ -583,6 +611,19 @@ class AgentOrchestrator:
                     step.step,
                     suffix="after",
                 )
+
+                # Send updated screenshot and tabs to UI
+                try:
+                    tab_states = await self.tab_manager.get_all_tab_states()
+                    self._update_status({
+                        "stage": "action_executed",
+                        "screenshot": screenshot_after,
+                        "tabs": tab_states,
+                        "current_url": url_after,
+                        "action_type": action.action_type,
+                    })
+                except Exception:
+                    pass
 
                 # Stage 4: VERIFICATION
                 verification = await self.verifier.verify_action(

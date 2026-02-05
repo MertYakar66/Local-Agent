@@ -101,9 +101,11 @@ _thought_queue = queue.Queue()
 _result_queue = queue.Queue()
 _step_queue = queue.Queue()
 _screenshot_queue = queue.Queue()
+_tabs_queue = queue.Queue()
 _hitl_request_queue = queue.Queue()
 _hitl_response_event = threading.Event()
 _hitl_response_value = None
+_stop_flag = threading.Event()
 
 
 def add_thought(stage: str, content: str):
@@ -165,6 +167,15 @@ def process_queues():
         except queue.Empty:
             break
 
+    # Process tabs
+    while not _tabs_queue.empty():
+        try:
+            tabs = _tabs_queue.get_nowait()
+            if "tabs" in st.session_state:
+                st.session_state.tabs = tabs
+        except queue.Empty:
+            break
+
     # Process HITL requests
     while not _hitl_request_queue.empty():
         try:
@@ -186,16 +197,23 @@ def process_queues():
 def status_callback(status: Dict[str, Any]):
     """Callback for agent status updates (thread-safe)"""
     stage = status.get("stage", "")
-    add_thought(stage, str(status))
+
+    # Don't log screenshot bytes in thought
+    status_for_thought = {k: v for k, v in status.items() if k != "screenshot"}
+    add_thought(stage, str(status_for_thought))
 
     if "current_step" in status:
         step = status["current_step"]
         # Queue step update instead of direct access
         _step_queue.put(step)
 
-    if "screenshot" in status:
+    if "screenshot" in status and status["screenshot"]:
         # Queue screenshot update
         _screenshot_queue.put(status["screenshot"])
+
+    if "tabs" in status and status["tabs"]:
+        # Queue tabs update
+        _tabs_queue.put(status["tabs"])
 
 
 def hitl_callback(action: Dict[str, Any], screenshot: bytes) -> bool:
@@ -229,6 +247,9 @@ def set_hitl_response(response: str):
 
 def run_agent_async(goal: str, orchestrator_holder: dict):
     """Run agent in background thread"""
+    global _stop_flag
+    _stop_flag.clear()  # Clear stop flag at start
+
     loop = None
     try:
         from src.main import AgentOrchestrator
@@ -249,6 +270,12 @@ def run_agent_async(goal: str, orchestrator_holder: dict):
         orchestrator_holder["orchestrator"] = orchestrator
 
         add_log("INFO", "Agent orchestrator initialized")
+
+        # Check stop flag before running
+        if _stop_flag.is_set():
+            add_log("WARNING", "Stop requested before task started")
+            _result_queue.put({"success": False, "error": "Stopped by user"})
+            return
 
         # Run task
         result = loop.run_until_complete(orchestrator.run_task(goal))
@@ -276,10 +303,15 @@ def run_agent_async(goal: str, orchestrator_holder: dict):
 
 def start_agent(goal: str):
     """Start the agent in a background thread"""
+    global _stop_flag
+    _stop_flag.clear()  # Clear stop flag before starting
+
     st.session_state.agent_running = True
     st.session_state.current_task = goal
     st.session_state.steps = []
     st.session_state.task_result = None
+    st.session_state.tabs = {}
+    st.session_state.current_screenshot = None
     st.session_state.orchestrator_holder = {"orchestrator": None}
 
     add_log("INFO", f"Starting task: {goal}")
@@ -295,10 +327,14 @@ def start_agent(goal: str):
 
 def stop_agent():
     """Request agent stop"""
+    global _stop_flag
+    _stop_flag.set()  # Set global stop flag immediately
+
     holder = getattr(st.session_state, 'orchestrator_holder', None)
     if holder and holder.get("orchestrator"):
         holder["orchestrator"]._stop_requested = True
     add_log("WARNING", "Stop requested")
+    st.session_state.agent_running = False
 
 
 def main():
@@ -337,21 +373,30 @@ def main():
         control = render_controls(st.session_state.agent_running)
         if control == "stop":
             stop_agent()
+            st.rerun()  # Force UI refresh after stop
         elif control == "reset":
+            _stop_flag.set()  # Ensure any running agent stops
             for key in list(st.session_state.keys()):
                 del st.session_state[key]
             st.rerun()
 
         st.divider()
 
-        # Metrics
+        # Metrics - update active_tabs from actual tabs
+        metrics = st.session_state.metrics.copy()
+        metrics["active_tabs"] = len(st.session_state.tabs) if st.session_state.tabs else 0
+
         st.header("Performance")
-        render_metrics(**st.session_state.metrics)
+        render_metrics(**metrics)
 
         st.divider()
 
         # Tab overview
-        render_tab_overview(st.session_state.tabs)
+        st.header("Browser Tabs")
+        if st.session_state.tabs:
+            render_tab_overview(st.session_state.tabs)
+        else:
+            st.info("No browser tabs open yet")
 
     # Main content area
     col1, col2 = st.columns([3, 2])
@@ -426,7 +471,14 @@ def main():
 
     # Auto-refresh while running
     if st.session_state.agent_running:
-        time.sleep(0.5)
+        # Check if agent thread is still alive
+        agent_thread = getattr(st.session_state, 'agent_thread', None)
+        if agent_thread and not agent_thread.is_alive():
+            # Thread finished, process remaining queues
+            process_queues()
+            st.session_state.agent_running = False
+
+        time.sleep(0.3)  # Shorter interval for more responsive updates
         st.rerun()
 
 
