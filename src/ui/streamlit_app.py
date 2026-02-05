@@ -3,6 +3,7 @@
 import asyncio
 import io
 import sys
+import platform
 import threading
 import time
 from collections import deque
@@ -12,6 +13,10 @@ from typing import Any, Dict, List, Optional
 
 import streamlit as st
 from PIL import Image
+
+# Fix Windows asyncio subprocess issue
+if platform.system() == "Windows":
+    asyncio.set_event_loop_policy(asyncio.WindowsProactorEventLoopPolicy())
 
 # Add parent directory to path for imports
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
@@ -84,13 +89,20 @@ def init_session_state():
             "active_tabs": 0,
         }
         st.session_state.task_result = None
-        st.session_state.orchestrator = None
+        st.session_state.orchestrator_holder = {"orchestrator": None}
         st.session_state.agent_thread = None
 
 
+# Thread-safe queues for cross-thread communication
+import queue
+_log_queue = queue.Queue()
+_thought_queue = queue.Queue()
+_result_queue = queue.Queue()
+
+
 def add_thought(stage: str, content: str):
-    """Add a thought to the thought log"""
-    st.session_state.thoughts.append({
+    """Add a thought to the thought log (thread-safe)"""
+    _thought_queue.put({
         "stage": stage,
         "content": content,
         "timestamp": datetime.now().isoformat(),
@@ -98,12 +110,42 @@ def add_thought(stage: str, content: str):
 
 
 def add_log(level: str, message: str):
-    """Add a log entry"""
-    st.session_state.logs.append({
+    """Add a log entry (thread-safe)"""
+    _log_queue.put({
         "level": level,
         "message": message,
         "timestamp": datetime.now().isoformat(),
     })
+
+
+def process_queues():
+    """Process queued updates from background threads"""
+    # Process logs
+    while not _log_queue.empty():
+        try:
+            log = _log_queue.get_nowait()
+            if "logs" in st.session_state:
+                st.session_state.logs.append(log)
+        except queue.Empty:
+            break
+
+    # Process thoughts
+    while not _thought_queue.empty():
+        try:
+            thought = _thought_queue.get_nowait()
+            if "thoughts" in st.session_state:
+                st.session_state.thoughts.append(thought)
+        except queue.Empty:
+            break
+
+    # Process results
+    while not _result_queue.empty():
+        try:
+            result = _result_queue.get_nowait()
+            st.session_state.task_result = result
+            st.session_state.agent_running = False
+        except queue.Empty:
+            break
 
 
 def status_callback(status: Dict[str, Any]):
@@ -144,41 +186,51 @@ def hitl_callback(action: Dict[str, Any], screenshot: bytes) -> bool:
     return response == "approve"
 
 
-def run_agent_async(goal: str):
+def run_agent_async(goal: str, orchestrator_holder: dict):
     """Run agent in background thread"""
+    loop = None
     try:
         from src.main import AgentOrchestrator
 
-        # Create event loop for this thread
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
+        # Create event loop for this thread with Windows fix
+        if platform.system() == "Windows":
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+        else:
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
 
         # Create orchestrator
         orchestrator = AgentOrchestrator(
             hitl_callback=hitl_callback,
             status_callback=status_callback,
         )
-        st.session_state.orchestrator = orchestrator
+        orchestrator_holder["orchestrator"] = orchestrator
+
+        add_log("INFO", "Agent orchestrator initialized")
 
         # Run task
         result = loop.run_until_complete(orchestrator.run_task(goal))
 
-        st.session_state.task_result = result
-        st.session_state.agent_running = False
-
+        _result_queue.put(result)
         add_log("INFO", f"Task completed: {'SUCCESS' if result.get('success') else 'FAILED'}")
 
     except Exception as e:
-        add_log("ERROR", f"Agent error: {str(e)}")
-        st.session_state.agent_running = False
-        st.session_state.task_result = {"success": False, "error": str(e)}
+        import traceback
+        error_msg = f"Agent error: {str(e)}"
+        add_log("ERROR", error_msg)
+        add_log("DEBUG", traceback.format_exc())
+        _result_queue.put({"success": False, "error": str(e)})
 
     finally:
-        if st.session_state.orchestrator:
+        orchestrator = orchestrator_holder.get("orchestrator")
+        if orchestrator and loop:
             try:
-                loop.run_until_complete(st.session_state.orchestrator.stop())
+                loop.run_until_complete(orchestrator.stop())
             except Exception:
                 pass
+        if loop:
+            loop.close()
 
 
 def start_agent(goal: str):
@@ -187,24 +239,33 @@ def start_agent(goal: str):
     st.session_state.current_task = goal
     st.session_state.steps = []
     st.session_state.task_result = None
+    st.session_state.orchestrator_holder = {"orchestrator": None}
 
     add_log("INFO", f"Starting task: {goal}")
 
-    thread = threading.Thread(target=run_agent_async, args=(goal,), daemon=True)
+    thread = threading.Thread(
+        target=run_agent_async,
+        args=(goal, st.session_state.orchestrator_holder),
+        daemon=True
+    )
     thread.start()
     st.session_state.agent_thread = thread
 
 
 def stop_agent():
     """Request agent stop"""
-    if st.session_state.orchestrator:
-        st.session_state.orchestrator._stop_requested = True
+    holder = getattr(st.session_state, 'orchestrator_holder', None)
+    if holder and holder.get("orchestrator"):
+        holder["orchestrator"]._stop_requested = True
     add_log("WARNING", "Stop requested")
 
 
 def main():
     """Main Streamlit app"""
     init_session_state()
+
+    # Process any queued updates from background threads
+    process_queues()
 
     # Header
     st.title("🤖 Autonomous Browser Agent")
