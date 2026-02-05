@@ -95,9 +95,15 @@ def init_session_state():
 
 # Thread-safe queues for cross-thread communication
 import queue
+import threading
 _log_queue = queue.Queue()
 _thought_queue = queue.Queue()
 _result_queue = queue.Queue()
+_step_queue = queue.Queue()
+_screenshot_queue = queue.Queue()
+_hitl_request_queue = queue.Queue()
+_hitl_response_event = threading.Event()
+_hitl_response_value = None
 
 
 def add_thought(stage: str, content: str):
@@ -138,6 +144,35 @@ def process_queues():
         except queue.Empty:
             break
 
+    # Process steps
+    while not _step_queue.empty():
+        try:
+            step_update = _step_queue.get_nowait()
+            if "steps" in st.session_state:
+                step_num = step_update.get("step", 0)
+                while len(st.session_state.steps) < step_num:
+                    st.session_state.steps.append({})
+                if step_num > 0:
+                    st.session_state.steps[step_num - 1] = step_update
+        except queue.Empty:
+            break
+
+    # Process screenshots
+    while not _screenshot_queue.empty():
+        try:
+            screenshot = _screenshot_queue.get_nowait()
+            st.session_state.current_screenshot = screenshot
+        except queue.Empty:
+            break
+
+    # Process HITL requests
+    while not _hitl_request_queue.empty():
+        try:
+            hitl_request = _hitl_request_queue.get_nowait()
+            st.session_state.hitl_pending = hitl_request
+        except queue.Empty:
+            break
+
     # Process results
     while not _result_queue.empty():
         try:
@@ -149,41 +184,47 @@ def process_queues():
 
 
 def status_callback(status: Dict[str, Any]):
-    """Callback for agent status updates"""
+    """Callback for agent status updates (thread-safe)"""
     stage = status.get("stage", "")
     add_thought(stage, str(status))
 
     if "current_step" in status:
         step = status["current_step"]
-        # Update steps list
-        step_num = step.get("step", 0)
-        while len(st.session_state.steps) < step_num:
-            st.session_state.steps.append({})
-        if step_num > 0:
-            st.session_state.steps[step_num - 1] = step
+        # Queue step update instead of direct access
+        _step_queue.put(step)
+
+    if "screenshot" in status:
+        # Queue screenshot update
+        _screenshot_queue.put(status["screenshot"])
 
 
 def hitl_callback(action: Dict[str, Any], screenshot: bytes) -> bool:
-    """Callback for HITL approval requests"""
-    st.session_state.hitl_pending = {
+    """Callback for HITL approval requests (thread-safe)"""
+    global _hitl_response_value
+
+    # Queue the HITL request
+    _hitl_request_queue.put({
         "action": action,
         "screenshot": screenshot,
-    }
+    })
 
-    # Wait for user response
+    # Clear the event and wait for response
+    _hitl_response_event.clear()
+    _hitl_response_value = None
+
+    # Wait for user response with timeout
     timeout = 300  # 5 minute timeout
-    start = time.time()
-    while st.session_state.hitl_response is None:
-        time.sleep(0.5)
-        if time.time() - start > timeout:
-            st.session_state.hitl_pending = None
-            return False
+    if _hitl_response_event.wait(timeout=timeout):
+        return _hitl_response_value == "approve"
 
-    response = st.session_state.hitl_response
-    st.session_state.hitl_pending = None
-    st.session_state.hitl_response = None
+    return False
 
-    return response == "approve"
+
+def set_hitl_response(response: str):
+    """Set HITL response from main thread"""
+    global _hitl_response_value
+    _hitl_response_value = response
+    _hitl_response_event.set()
 
 
 def run_agent_async(goal: str, orchestrator_holder: dict):
@@ -360,7 +401,8 @@ def main():
         )
 
         if response:
-            st.session_state.hitl_response = response
+            set_hitl_response(response)
+            st.session_state.hitl_pending = None
             st.rerun()
 
     # Task result
