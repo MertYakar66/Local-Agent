@@ -1,4 +1,11 @@
-"""Main entry point and orchestration loop for the autonomous browser agent"""
+"""Main entry point and orchestration loop for the autonomous browser agent
+
+Enhanced with security hardening:
+- Emergency stop mechanism
+- Circuit breaker pattern
+- Security audit logging
+- Rate limiting protection
+"""
 
 import asyncio
 import signal
@@ -11,6 +18,13 @@ from loguru import logger
 
 from src.utils.config import config
 from src.utils.error_handling import HITLRequired, AgentError
+from src.utils.security import (
+    get_emergency_stop,
+    get_security_log,
+    get_rate_limiter,
+    SecurityLevel,
+    SecurityEvent,
+)
 from src.browser.tab_manager import TabManager
 from src.browser.action_executor import ActionExecutor, is_sensitive_action
 from src.browser.screenshot_utils import ScreenshotManager
@@ -19,6 +33,11 @@ from src.agents.vision_actor import VisionActorAgent, ActionOutput
 from src.agents.verifier import VerifierAgent, VerificationResult
 from src.memory.chroma_manager import ChromaManager, PageMemory, ExtractedData
 from src.memory.logger import StructuredLogger
+
+
+# Circuit breaker settings
+CIRCUIT_BREAKER_THRESHOLD = 10  # Stop after 10 consecutive failures
+CIRCUIT_BREAKER_RESET_TIME = 300  # Reset after 5 minutes
 
 
 class AgentOrchestrator:
@@ -30,6 +49,12 @@ class AgentOrchestrator:
     2. VISION-ACTION: Executes one step with screenshot analysis
     3. EXECUTION: Performs Playwright interaction
     4. VERIFICATION: Checks success and updates memory
+
+    Security Features:
+    - Emergency stop mechanism
+    - Circuit breaker pattern for failure protection
+    - Security audit logging
+    - Rate limiting protection
     """
 
     def __init__(
@@ -61,6 +86,15 @@ class AgentOrchestrator:
         self._running = False
         self._current_plan: Optional[TaskPlan] = None
         self._stop_requested = False
+
+        # Security components
+        self._emergency_stop = get_emergency_stop()
+        self._security_log = get_security_log()
+        self._rate_limiter = get_rate_limiter()
+
+        # Circuit breaker state
+        self._consecutive_failures = 0
+        self._last_failure_time: Optional[datetime] = None
 
     async def start(self) -> None:
         """Initialize all components"""
@@ -132,6 +166,54 @@ class AgentOrchestrator:
         )
         return False
 
+    def trigger_emergency_stop(self, reason: str) -> None:
+        """Trigger emergency stop - halts all operations"""
+        self._emergency_stop.trigger_stop(reason)
+        self._security_log.log_event(SecurityEvent(
+            timestamp=datetime.now(),
+            event_type="emergency_stop_triggered",
+            severity=SecurityLevel.CRITICAL,
+            description=f"Emergency stop triggered: {reason}",
+        ))
+        self._stop_requested = True
+
+    def reset_emergency_stop(self) -> None:
+        """Reset emergency stop to allow operations to resume"""
+        self._emergency_stop.reset()
+        self._consecutive_failures = 0
+        self._security_log.log_event(SecurityEvent(
+            timestamp=datetime.now(),
+            event_type="emergency_stop_reset",
+            severity=SecurityLevel.HIGH,
+            description="Emergency stop reset - operations can resume",
+        ))
+
+    def _check_circuit_breaker(self) -> bool:
+        """Check if circuit breaker is tripped (too many failures)"""
+        # Reset after timeout
+        if self._last_failure_time:
+            time_since_failure = (datetime.now() - self._last_failure_time).total_seconds()
+            if time_since_failure > CIRCUIT_BREAKER_RESET_TIME:
+                self._consecutive_failures = 0
+                self._last_failure_time = None
+
+        return self._consecutive_failures >= CIRCUIT_BREAKER_THRESHOLD
+
+    def _record_circuit_breaker_failure(self) -> None:
+        """Record a failure for circuit breaker"""
+        self._consecutive_failures += 1
+        self._last_failure_time = datetime.now()
+
+        if self._consecutive_failures >= CIRCUIT_BREAKER_THRESHOLD:
+            self.trigger_emergency_stop(
+                f"Circuit breaker tripped: {CIRCUIT_BREAKER_THRESHOLD} consecutive failures"
+            )
+
+    def _record_circuit_breaker_success(self) -> None:
+        """Record a success - reduces circuit breaker count"""
+        if self._consecutive_failures > 0:
+            self._consecutive_failures -= 1
+
     async def run_task(self, user_goal: str) -> Dict[str, Any]:
         """
         Run a complete task from goal to completion.
@@ -143,11 +225,56 @@ class AgentOrchestrator:
 
         Returns:
             Task result dictionary
+
+        Security:
+            - Checks emergency stop before starting
+            - Validates rate limits
+            - Monitors for circuit breaker trips
         """
+        # Security Check 1: Emergency stop
+        if self._emergency_stop.is_stopped():
+            error_msg = f"Cannot start task - emergency stop active: {self._emergency_stop.get_status()['reason']}"
+            logger.error(error_msg)
+            return {
+                "success": False,
+                "error": error_msg,
+                "emergency_stop": True,
+            }
+
+        # Security Check 2: Circuit breaker
+        if self._check_circuit_breaker():
+            error_msg = "Cannot start task - circuit breaker tripped (too many failures)"
+            logger.error(error_msg)
+            return {
+                "success": False,
+                "error": error_msg,
+                "circuit_breaker": True,
+            }
+
+        # Security Check 3: Rate limiting
+        allowed, rate_error = self._rate_limiter.is_allowed("tasks")
+        if not allowed:
+            error_msg = f"Cannot start task - {rate_error}"
+            logger.warning(error_msg)
+            return {
+                "success": False,
+                "error": error_msg,
+                "rate_limited": True,
+            }
+
         if not self._running:
             await self.start()
 
         logger.info(f"Starting task: {user_goal}")
+
+        # Log task start for security audit
+        self._security_log.log_event(SecurityEvent(
+            timestamp=datetime.now(),
+            event_type="task_started",
+            severity=SecurityLevel.LOW,
+            description=f"Task started: {user_goal[:100]}",
+            details={"goal": user_goal},
+        ))
 
         # Start logging
         task_id = self.structured_logger.start_task(user_goal)
@@ -206,6 +333,9 @@ class AgentOrchestrator:
                     # Record success for tiered intelligence (may switch back to primary model)
                     self.vision_actor.record_success()
 
+                    # Record success for circuit breaker
+                    self._record_circuit_breaker_success()
+
                     # Collect extracted data
                     if step_result.get("extracted_data"):
                         extracted_data.append({
@@ -224,6 +354,14 @@ class AgentOrchestrator:
                         logger.warning(
                             "[Tiered Intelligence] Switched to fallback model for deeper analysis"
                         )
+
+                    # Record failure for circuit breaker
+                    self._record_circuit_breaker_failure()
+
+                    # Check if emergency stop was triggered
+                    if self._emergency_stop.is_stopped():
+                        logger.error("Emergency stop triggered - aborting task")
+                        break
 
                     # Try to refine plan
                     if step_index < len(plan.steps) - 1:
@@ -272,6 +410,19 @@ class AgentOrchestrator:
                 "result": final_result,
             })
 
+            # Log successful task completion
+            self._security_log.log_event(SecurityEvent(
+                timestamp=datetime.now(),
+                event_type="task_completed",
+                severity=SecurityLevel.LOW,
+                description=f"Task completed successfully: {user_goal[:50]}...",
+                details={
+                    "task_id": task_id,
+                    "steps_completed": plan.current_step_index,
+                    "total_steps": len(plan.steps),
+                },
+            ))
+
             return {
                 "task_id": task_id,
                 "success": plan.is_complete,
@@ -293,6 +444,21 @@ class AgentOrchestrator:
                 "stage": "failed",
                 "error": str(e),
             })
+
+            # Log task failure for security audit
+            self._security_log.log_event(SecurityEvent(
+                timestamp=datetime.now(),
+                event_type="task_failed",
+                severity=SecurityLevel.MEDIUM,
+                description=f"Task failed: {str(e)[:100]}",
+                details={
+                    "task_id": task_id,
+                    "error": str(e),
+                },
+            ))
+
+            # Record failure for circuit breaker
+            self._record_circuit_breaker_failure()
 
             return {
                 "task_id": task_id,
@@ -489,13 +655,28 @@ class AgentOrchestrator:
         }
 
     async def get_status(self) -> Dict[str, Any]:
-        """Get current agent status"""
+        """Get current agent status including security status"""
         return {
             "running": self._running,
             "current_plan": self._current_plan.to_dict() if self._current_plan else None,
             "tabs": await self.tab_manager.get_all_tab_states() if self.tab_manager else {},
             "memory_stats": await self.memory.get_stats() if self.memory else {},
             "log_stats": self.structured_logger.get_stats() if self.structured_logger else {},
+            "security": self.get_security_status(),
+        }
+
+    def get_security_status(self) -> Dict[str, Any]:
+        """Get current security status"""
+        return {
+            "emergency_stop": self._emergency_stop.get_status(),
+            "circuit_breaker": {
+                "consecutive_failures": self._consecutive_failures,
+                "threshold": CIRCUIT_BREAKER_THRESHOLD,
+                "tripped": self._consecutive_failures >= CIRCUIT_BREAKER_THRESHOLD,
+                "last_failure": self._last_failure_time.isoformat() if self._last_failure_time else None,
+            },
+            "recent_security_events": len(self._security_log.get_recent_events(hours=1)),
+            "blocked_actions_24h": self._security_log.get_blocked_count(hours=24),
         }
 
 

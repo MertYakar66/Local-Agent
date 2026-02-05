@@ -1,4 +1,12 @@
-"""Browser action execution for the autonomous browser agent"""
+"""Browser action execution for the autonomous browser agent
+
+Enhanced with security hardening:
+- Input sanitization for all fill actions
+- URL validation for navigation
+- Rate limiting to prevent abuse
+- Emergency stop mechanism
+- Security audit logging
+"""
 
 import asyncio
 import re
@@ -16,6 +24,14 @@ from src.utils.error_handling import (
     ActionError,
     RetryConfig,
     with_retry,
+)
+from src.utils.security import (
+    SecurityLevel,
+    validate_action,
+    sanitize_input,
+    get_emergency_stop,
+    get_rate_limiter,
+    get_security_log,
 )
 
 
@@ -141,12 +157,102 @@ class ActionExecutor:
 
         Returns:
             ActionResult with success status and details
+
+        Security:
+            - Validates action before execution
+            - Checks emergency stop
+            - Enforces rate limits
+            - Sanitizes inputs
+            - Logs security events
         """
         start_time = datetime.now()
         action_type = action.get("action_type", "").lower()
+        current_url = self.page.url
+        security_log = get_security_log()
+        emergency_stop = get_emergency_stop()
+        rate_limiter = get_rate_limiter()
 
         logger.info(f"Executing action: {action_type}")
         logger.debug(f"Action details: {action}")
+
+        # Security Check 1: Emergency stop
+        if emergency_stop.is_stopped():
+            error_msg = f"Emergency stop active: {emergency_stop.get_status()['reason']}"
+            logger.error(error_msg)
+            security_log.log_blocked_action(action_type, "Emergency stop active", current_url)
+            return ActionResult(
+                success=False,
+                action_type=action_type,
+                error_message=error_msg,
+                page_url_after=current_url,
+                duration_ms=0.0,
+            )
+
+        # Security Check 2: URL blocked
+        if emergency_stop.is_url_blocked(current_url):
+            error_msg = f"URL is blocked: {current_url}"
+            logger.error(error_msg)
+            security_log.log_blocked_action(action_type, "URL blocked", current_url)
+            return ActionResult(
+                success=False,
+                action_type=action_type,
+                error_message=error_msg,
+                page_url_after=current_url,
+                duration_ms=0.0,
+            )
+
+        # Security Check 3: Action blocked
+        if emergency_stop.is_action_blocked(action_type):
+            error_msg = f"Action type is blocked: {action_type}"
+            logger.error(error_msg)
+            security_log.log_blocked_action(action_type, "Action type blocked", current_url)
+            return ActionResult(
+                success=False,
+                action_type=action_type,
+                error_message=error_msg,
+                page_url_after=current_url,
+                duration_ms=0.0,
+            )
+
+        # Security Check 4: Rate limiting
+        allowed, rate_error = rate_limiter.is_action_allowed("browser_actions")
+        if not allowed:
+            error_msg = f"Rate limit exceeded: {rate_error}"
+            logger.warning(error_msg)
+            security_log.log_blocked_action(action_type, rate_error, current_url)
+            return ActionResult(
+                success=False,
+                action_type=action_type,
+                error_message=error_msg,
+                page_url_after=current_url,
+                duration_ms=0.0,
+            )
+
+        # Security Check 5: Validate action
+        target_element = action.get("target_element", {})
+        value = action.get("value")
+        is_valid, validation_msg, security_level = validate_action(
+            action_type,
+            target_element,
+            current_url,
+            value,
+        )
+
+        if not is_valid:
+            error_msg = f"Action validation failed: {validation_msg}"
+            logger.error(error_msg)
+            security_log.log_blocked_action(action_type, validation_msg, current_url)
+            return ActionResult(
+                success=False,
+                action_type=action_type,
+                error_message=error_msg,
+                page_url_after=current_url,
+                duration_ms=0.0,
+            )
+
+        # Log high/critical security level actions
+        if security_level in (SecurityLevel.HIGH, SecurityLevel.CRITICAL):
+            logger.warning(f"[SECURITY] {security_level.value} action: {action_type} at {current_url}")
 
         try:
             result = await self._dispatch_action(action_type, action)
@@ -240,7 +346,7 @@ class ActionExecutor:
 
     @with_retry(RetryConfig(max_retries=3, base_delay=2.0))
     async def _execute_fill(self, action: Dict[str, Any]) -> ActionResult:
-        """Execute a fill/type action"""
+        """Execute a fill/type action with input sanitization"""
         target = action.get("target_element", {})
         bbox = target.get("bbox", [])
         value = action.get("value", "")
@@ -256,6 +362,19 @@ class ActionExecutor:
             raise ActionError(
                 "No value provided for fill action",
                 action_type="fill",
+            )
+
+        # SECURITY: Sanitize input value to prevent injection
+        original_value = value
+        value = sanitize_input(value)
+
+        if value != original_value:
+            logger.warning(f"[SECURITY] Input was sanitized (potential injection blocked)")
+            get_security_log().log_blocked_action(
+                "fill",
+                "Input sanitized - potential injection",
+                self.page.url,
+                {"original_length": len(original_value), "sanitized_length": len(value)},
             )
 
         # Click to focus the input
@@ -281,6 +400,7 @@ class ActionExecutor:
                 "bbox": bbox,
                 "value_length": len(value),
                 "element_description": target.get("description"),
+                "was_sanitized": value != original_value,
             },
         )
 

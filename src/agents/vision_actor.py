@@ -1,4 +1,9 @@
-"""Vision-Action agent for screenshot analysis and action generation"""
+"""Vision-Action agent for screenshot analysis and action generation
+
+Enhanced with efficiency optimizations:
+- Action caching for repeated interactions
+- Performance monitoring
+"""
 
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Tuple
@@ -7,7 +12,8 @@ from loguru import logger
 
 from src.agents.base_agent import BaseAgent, LLMConfig
 from src.utils.config import config
-from src.utils.vision_utils import image_to_base64
+from src.utils.vision_utils import image_to_base64, calculate_center
+from src.utils.efficiency import get_action_cache, get_performance_monitor
 
 
 @dataclass
@@ -158,6 +164,7 @@ class VisionActorAgent(BaseAgent):
         step_description: str,
         current_url: str,
         additional_context: Optional[str] = None,
+        use_cache: bool = True,
     ) -> ActionOutput:
         """
         Analyze screenshot and generate action for the current step.
@@ -167,11 +174,47 @@ class VisionActorAgent(BaseAgent):
             step_description: Description of what to do
             current_url: Current page URL
             additional_context: Optional context (e.g., previous failed attempts)
+            use_cache: Whether to check action cache first
 
         Returns:
             ActionOutput with action type and coordinates
+
+        Efficiency:
+            - Checks action cache before calling vision model
+            - Caches high-confidence results for reuse
+            - Records performance metrics
         """
+        import time
+        start_time = time.time()
+        perf_monitor = get_performance_monitor()
+        action_cache = get_action_cache()
+
         logger.info(f"[VisionActor] Analyzing screenshot for: {step_description}")
+
+        # Check action cache first (only if no additional context which suggests retry)
+        if use_cache and not additional_context:
+            cached = action_cache.get(current_url, step_description)
+            if cached:
+                logger.info("[VisionActor] Using cached action coordinates")
+                perf_monitor.record_count("action_cache_hits")
+
+                # Create action from cache
+                action = ActionOutput(
+                    action_type="click",  # Cached actions are typically clicks
+                    target_element=TargetElement(
+                        description=cached.element_description,
+                        bbox=cached.bbox,
+                        confidence=cached.confidence,
+                    ),
+                    reasoning="Using cached coordinates from previous successful action",
+                    confidence=cached.confidence,
+                )
+
+                duration_ms = (time.time() - start_time) * 1000
+                perf_monitor.record_timing("get_action_cached", duration_ms)
+                return action
+
+        perf_monitor.record_count("action_cache_misses")
 
         # Convert screenshot to base64
         screenshot_b64 = image_to_base64(screenshot_bytes)
@@ -203,14 +246,38 @@ class VisionActorAgent(BaseAgent):
                     f"[VisionActor] Low confidence action: {confidence:.2f} < "
                     f"{config.action_confidence_threshold}"
                 )
+            else:
+                # Store high-confidence actions in cache
+                bbox = action.target_element.bbox
+                pixel_coords = calculate_center((bbox[0], bbox[1], bbox[2], bbox[3]))
+                action_cache.store(
+                    url=current_url,
+                    element_description=step_description,
+                    bbox=bbox,
+                    pixel_coords=pixel_coords,
+                    confidence=confidence,
+                )
+
+        duration_ms = (time.time() - start_time) * 1000
+        perf_monitor.record_timing("get_action_vision", duration_ms)
 
         logger.info(
             f"[VisionActor] Generated action: {action.action_type} "
-            f"(confidence: {action.confidence:.2f})"
+            f"(confidence: {action.confidence:.2f}, {duration_ms:.0f}ms)"
         )
         logger.debug(f"[VisionActor] Reasoning: {action.reasoning}")
 
         return action
+
+    def record_action_success(self, current_url: str, step_description: str) -> None:
+        """Record that a cached action was successful"""
+        action_cache = get_action_cache()
+        action_cache.record_success(current_url, step_description)
+
+    def invalidate_cached_action(self, current_url: str, step_description: str) -> None:
+        """Invalidate a cached action that failed"""
+        action_cache = get_action_cache()
+        action_cache.record_failure(current_url, step_description)
 
     async def reanalyze_after_failure(
         self,

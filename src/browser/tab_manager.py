@@ -1,4 +1,11 @@
-"""Multi-tab browser management for the autonomous browser agent"""
+"""Multi-tab browser management for the autonomous browser agent
+
+Enhanced with security hardening:
+- URL validation and sanitization
+- SSRF prevention (blocks private IPs)
+- Emergency stop integration
+- Security audit logging
+"""
 
 import asyncio
 from dataclasses import dataclass, field
@@ -17,6 +24,13 @@ from playwright.async_api import (
 from loguru import logger
 
 from src.utils.config import config
+from src.utils.security import (
+    validate_url,
+    sanitize_url,
+    get_emergency_stop,
+    get_security_log,
+    ThreatType,
+)
 
 
 class TabStatus(Enum):
@@ -239,7 +253,7 @@ class TabManager:
         wait_until: str = "networkidle"
     ) -> TabState:
         """
-        Navigate a tab to a URL.
+        Navigate a tab to a URL with security validation.
 
         Args:
             tab_id: Tab to navigate
@@ -248,17 +262,55 @@ class TabManager:
 
         Returns:
             Updated TabState
+
+        Security:
+            - Validates URL against SSRF attacks
+            - Blocks private/internal IPs
+            - Enforces HTTPS where possible
+            - Respects emergency stop
         """
         if tab_id not in self.tabs:
             raise ValueError(f"Tab {tab_id} not found")
 
         tab_state = self.tabs[tab_id]
+        security_log = get_security_log()
+        emergency_stop = get_emergency_stop()
+
+        # Security Check 1: Emergency stop
+        if emergency_stop.is_stopped():
+            error_msg = f"Emergency stop active: {emergency_stop.get_status()['reason']}"
+            logger.error(error_msg)
+            tab_state.status = TabStatus.ERROR
+            tab_state.error_message = error_msg
+            raise RuntimeError(error_msg)
+
+        # Security Check 2: URL blocked
+        if emergency_stop.is_url_blocked(url):
+            error_msg = f"URL is blocked: {url}"
+            logger.error(error_msg)
+            security_log.log_blocked_action("navigate", "URL blocked", url)
+            tab_state.status = TabStatus.ERROR
+            tab_state.error_message = error_msg
+            raise ValueError(error_msg)
+
+        # Sanitize URL (adds https:// if needed, removes control chars)
+        url = sanitize_url(url)
+
+        # Security Check 3: Validate URL for SSRF and malicious patterns
+        is_valid, validation_error = validate_url(url)
+        if not is_valid:
+            error_msg = f"URL validation failed: {validation_error}"
+            logger.error(f"[SECURITY] {error_msg}")
+            security_log.log_threat_detected(
+                ThreatType.SSRF if "SSRF" in validation_error else ThreatType.MALICIOUS_URL,
+                error_msg,
+                url,
+            )
+            tab_state.status = TabStatus.ERROR
+            tab_state.error_message = error_msg
+            raise ValueError(error_msg)
+
         tab_state.status = TabStatus.LOADING
-
-        # Add https:// if not present
-        if not url.startswith(("http://", "https://")):
-            url = f"https://{url}"
-
         logger.info(f"Tab {tab_id}: Navigating to {url}")
 
         try:
