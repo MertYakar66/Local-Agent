@@ -203,6 +203,9 @@ class AgentOrchestrator:
                 if step_result.get("success"):
                     plan.mark_step_completed(step_index, step_result)
 
+                    # Record success for tiered intelligence (may switch back to primary model)
+                    self.vision_actor.record_success()
+
                     # Collect extracted data
                     if step_result.get("extracted_data"):
                         extracted_data.append({
@@ -214,6 +217,13 @@ class AgentOrchestrator:
                     # Handle step failure
                     error = step_result.get("error", "Unknown error")
                     plan.mark_step_failed(step_index, error)
+
+                    # Record failure for tiered intelligence (may trigger fallback to 30b)
+                    switched_to_fallback = self.vision_actor.record_failure()
+                    if switched_to_fallback:
+                        logger.warning(
+                            "[Tiered Intelligence] Switched to fallback model for deeper analysis"
+                        )
 
                     # Try to refine plan
                     if step_index < len(plan.steps) - 1:

@@ -16,6 +16,8 @@ from src.utils.config import config
 class LLMConfig:
     """Configuration for LLM inference"""
     model_name: str = config.model_name
+    fallback_model_name: str = config.fallback_model_name
+    fallback_after_failures: int = config.fallback_after_failures
     temperature: float = config.temperature
     context_length: int = config.context_length
     ollama_url: str = config.ollama_url
@@ -25,10 +27,10 @@ class BaseAgent:
     """
     Base class for all agents with shared LLM connection logic.
 
-    Optimized for RTX 4080 Super (16GB VRAM):
-    - Qwen2.5-VL-7B at 4-bit quantization uses ~10.5GB VRAM
-    - KV cache for 32k tokens uses ~4GB VRAM during long sessions
-    - Target inference speed: 40-60 tokens/second
+    Tiered Intelligence Strategy for RTX 4080 Super (16GB VRAM):
+    - Primary model (8b): Fast, handles 95% of tasks (~40-60 tokens/sec)
+    - Fallback model (30b): Smarter, invoked after consecutive failures
+    - Ollama hot-swaps models automatically
     """
 
     def __init__(
@@ -41,6 +43,11 @@ class BaseAgent:
 
         # HTTP client for Ollama API
         self._client: Optional[httpx.AsyncClient] = None
+
+        # Tiered intelligence state
+        self._using_fallback: bool = False
+        self._consecutive_failures: int = 0
+        self._active_model: str = self.llm_config.model_name
 
     async def initialize(self) -> None:
         """Initialize the HTTP client"""
@@ -84,9 +91,9 @@ class BaseAgent:
         """
         client = await self._ensure_client()
 
-        # Build request payload
+        # Build request payload (use active model for tiered intelligence)
         payload = {
-            "model": self.llm_config.model_name,
+            "model": self._active_model,
             "prompt": prompt,
             "stream": False,
             "options": {
@@ -278,13 +285,86 @@ class BaseAgent:
         try:
             response = await client.post(
                 "/api/show",
-                json={"name": self.llm_config.model_name},
+                json={"name": self._active_model},
             )
             response.raise_for_status()
             return response.json()
         except Exception as e:
             logger.warning(f"Failed to get model info: {e}")
             return {}
+
+    # ============================================================
+    # Tiered Intelligence: Model Switching Methods
+    # ============================================================
+
+    def record_success(self) -> None:
+        """Record a successful action - reset failure counter"""
+        self._consecutive_failures = 0
+        # If we were using fallback and succeeded, switch back to primary
+        if self._using_fallback:
+            self._switch_to_primary()
+
+    def record_failure(self) -> bool:
+        """
+        Record a failed action.
+
+        Returns:
+            True if switched to fallback model, False otherwise
+        """
+        self._consecutive_failures += 1
+        logger.warning(
+            f"[{self.agent_name}] Consecutive failures: {self._consecutive_failures}"
+        )
+
+        # Check if we should switch to fallback
+        if (
+            not self._using_fallback
+            and self._consecutive_failures >= self.llm_config.fallback_after_failures
+        ):
+            self._switch_to_fallback()
+            return True
+
+        return False
+
+    def _switch_to_fallback(self) -> None:
+        """Switch to the fallback (30b) model for deeper analysis"""
+        logger.warning(
+            f"[{self.agent_name}] Switching to fallback model: "
+            f"{self.llm_config.fallback_model_name}"
+        )
+        self._active_model = self.llm_config.fallback_model_name
+        self._using_fallback = True
+        self._consecutive_failures = 0
+
+    def _switch_to_primary(self) -> None:
+        """Switch back to primary (8b) model for speed"""
+        logger.info(
+            f"[{self.agent_name}] Switching back to primary model: "
+            f"{self.llm_config.model_name}"
+        )
+        self._active_model = self.llm_config.model_name
+        self._using_fallback = False
+        self._consecutive_failures = 0
+
+    def force_fallback(self) -> None:
+        """Force switch to fallback model (for complex tasks)"""
+        if not self._using_fallback:
+            self._switch_to_fallback()
+
+    def force_primary(self) -> None:
+        """Force switch to primary model"""
+        if self._using_fallback:
+            self._switch_to_primary()
+
+    @property
+    def is_using_fallback(self) -> bool:
+        """Check if currently using fallback model"""
+        return self._using_fallback
+
+    @property
+    def current_model(self) -> str:
+        """Get the currently active model name"""
+        return self._active_model
 
 
 async def test_ollama_connection(ollama_url: str = config.ollama_url) -> Dict[str, Any]:

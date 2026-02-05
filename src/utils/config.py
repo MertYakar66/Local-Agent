@@ -20,12 +20,20 @@ class AgentConfig(BaseModel):
     # Project Paths
     base_dir: Path = Field(default_factory=lambda: Path(__file__).parent.parent.parent)
 
-    # Model Settings
+    # Model Settings - Tiered Intelligence Strategy
+    # Primary model (8b): Fast, handles 95% of tasks (~40-60 tokens/sec)
+    # Fallback model (30b): Smarter, invoked when primary fails 3x
     ollama_url: str = Field(
         default_factory=lambda: os.getenv("OLLAMA_URL", "http://localhost:11434")
     )
     model_name: str = Field(
-        default_factory=lambda: os.getenv("MODEL_NAME", "qwen2.5-vl:7b-instruct-q4_K_M")
+        default_factory=lambda: os.getenv("MODEL_NAME", "qwen3-vl:8b")
+    )
+    fallback_model_name: str = Field(
+        default_factory=lambda: os.getenv("FALLBACK_MODEL_NAME", "qwen3-vl:30b")
+    )
+    fallback_after_failures: int = Field(
+        default_factory=lambda: int(os.getenv("FALLBACK_AFTER_FAILURES", "3"))
     )
     context_length: int = 32768  # 32k tokens
     temperature: float = 0.3  # Low temp for deterministic actions
