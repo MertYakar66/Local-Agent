@@ -6,9 +6,15 @@ Enhanced with security hardening:
 - Rate limiting to prevent abuse
 - Emergency stop mechanism
 - Security audit logging
+
+Human-like behavior:
+- Random delays between actions
+- Natural mouse movement paths
+- Typing with variable speed
 """
 
 import asyncio
+import random
 import re
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -17,6 +23,25 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from playwright.async_api import Page, TimeoutError as PlaywrightTimeout
 from loguru import logger
+
+
+async def human_delay(min_ms: int = 100, max_ms: int = 500):
+    """Add a random human-like delay"""
+    delay = random.randint(min_ms, max_ms) / 1000
+    await asyncio.sleep(delay)
+
+
+async def human_type(page: Page, text: str, base_delay: int = 50):
+    """Type text with human-like variable speed"""
+    for char in text:
+        # Variable delay: faster for common chars, slower for special chars
+        if char in 'etaoinshrdlu':  # Common letters - faster
+            delay = random.randint(base_delay - 20, base_delay + 30)
+        elif char in ' ':  # Space - slight pause
+            delay = random.randint(base_delay, base_delay + 100)
+        else:  # Other chars - normal
+            delay = random.randint(base_delay, base_delay + 50)
+        await page.keyboard.type(char, delay=delay)
 
 from src.utils.config import config
 from src.utils.vision_utils import denormalize_bbox, calculate_center
@@ -317,22 +342,29 @@ class ActionExecutor:
                 target_element=target.get("description"),
             )
 
-        # Get click coordinates
+        # Get click coordinates with slight random offset for human-likeness
         click_x, click_y = self._get_click_point(bbox)
+        # Add small random jitter (±3 pixels)
+        click_x += random.randint(-3, 3)
+        click_y += random.randint(-3, 3)
 
         logger.info(
             f"Clicking at ({click_x}, {click_y}) - "
             f"Element: {target.get('description', 'unknown')}"
         )
 
-        # Wait for any animations
-        await asyncio.sleep(0.1)
+        # Human-like delay before action
+        await human_delay(100, 300)
+
+        # Move mouse to position (simulates human movement)
+        await self.page.mouse.move(click_x, click_y, steps=random.randint(5, 15))
+        await human_delay(50, 150)
 
         # Perform click
         await self.page.mouse.click(click_x, click_y)
 
-        # Wait for potential navigation or DOM updates
-        await asyncio.sleep(0.3)
+        # Human-like delay after click
+        await human_delay(200, 500)
 
         return ActionResult(
             success=True,
@@ -377,20 +409,28 @@ class ActionExecutor:
                 {"original_length": len(original_value), "sanitized_length": len(value)},
             )
 
-        # Click to focus the input
+        # Click to focus the input with slight jitter
         click_x, click_y = self._get_click_point(bbox)
+        click_x += random.randint(-3, 3)
+        click_y += random.randint(-3, 3)
 
         logger.info(
             f"Filling input at ({click_x}, {click_y}) with '{value[:20]}...'"
         )
 
+        # Human-like delay and mouse movement
+        await human_delay(100, 300)
+        await self.page.mouse.move(click_x, click_y, steps=random.randint(5, 15))
+        await human_delay(50, 150)
+
         # Click to focus
         await self.page.mouse.click(click_x, click_y)
-        await asyncio.sleep(0.1)
+        await human_delay(100, 200)
 
-        # Clear existing content and type new value
+        # Clear existing content and type new value with human-like speed
         await self.page.keyboard.press("Control+A")
-        await self.page.keyboard.type(value, delay=50)  # Human-like typing speed
+        await human_delay(50, 100)
+        await human_type(self.page, value)
 
         return ActionResult(
             success=True,

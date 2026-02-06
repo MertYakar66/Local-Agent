@@ -99,37 +99,91 @@ class TabManager:
         self._active_tab_id: Optional[int] = None
 
     async def initialize(self) -> None:
-        """Initialize Playwright and browser"""
-        logger.info("Initializing browser...")
+        """Initialize Playwright and browser with stealth mode"""
+        logger.info("Initializing browser with stealth mode...")
 
         self._playwright = await async_playwright().start()
 
-        # Launch Chromium with optimized settings
+        # Launch Chromium with stealth settings to avoid bot detection
         self._browser = await self._playwright.chromium.launch(
             headless=self.headless,
             args=[
                 "--disable-dev-shm-usage",  # Prevent memory exploits
-                "--disable-blink-features=AutomationControlled",  # Less bot detection
+                "--disable-blink-features=AutomationControlled",  # Hide automation
                 "--no-first-run",
                 "--no-default-browser-check",
                 "--disable-infobars",
+                "--disable-extensions",
+                "--disable-plugins-discovery",
+                "--disable-default-apps",
+                # Stealth flags
+                "--disable-web-security",
+                "--allow-running-insecure-content",
+                "--disable-features=IsolateOrigins,site-per-process",
+                "--flag-switches-begin",
+                "--flag-switches-end",
             ],
         )
 
-        # Create browser context with custom settings
+        # Create browser context with stealth settings
         self._context = await self._browser.new_context(
             viewport={"width": self.viewport_width, "height": self.viewport_height},
             user_agent=(
                 "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
                 "AppleWebKit/537.36 (KHTML, like Gecko) "
-                "Chrome/120.0.0.0 Safari/537.36"
+                "Chrome/122.0.0.0 Safari/537.36"
             ),
             java_script_enabled=True,
             bypass_csp=False,  # Keep CSP for security
+            locale="en-US",
+            timezone_id="America/New_York",
+            permissions=["geolocation"],
+            geolocation={"latitude": 40.7128, "longitude": -74.0060},  # NYC
+            color_scheme="light",
         )
 
+        # Apply stealth scripts to hide automation indicators
+        await self._context.add_init_script("""
+            // Override navigator.webdriver
+            Object.defineProperty(navigator, 'webdriver', {
+                get: () => undefined
+            });
+
+            // Override chrome.runtime
+            window.chrome = {
+                runtime: {}
+            };
+
+            // Override permissions query
+            const originalQuery = window.navigator.permissions.query;
+            window.navigator.permissions.query = (parameters) => (
+                parameters.name === 'notifications' ?
+                    Promise.resolve({ state: Notification.permission }) :
+                    originalQuery(parameters)
+            );
+
+            // Override plugins
+            Object.defineProperty(navigator, 'plugins', {
+                get: () => [1, 2, 3, 4, 5]
+            });
+
+            // Override languages
+            Object.defineProperty(navigator, 'languages', {
+                get: () => ['en-US', 'en']
+            });
+
+            // Hide automation console message
+            console.log = (function(old_console) {
+                return function() {
+                    var args = Array.prototype.slice.call(arguments);
+                    if (args[0] && args[0].toString().includes('cdc_')) return;
+                    old_console.apply(console, arguments);
+                };
+            })(console.log);
+        """)
+
         logger.info(
-            f"Browser initialized: {self.viewport_width}x{self.viewport_height}, "
+            f"Browser initialized with stealth mode: {self.viewport_width}x{self.viewport_height}, "
             f"headless={self.headless}"
         )
 
