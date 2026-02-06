@@ -335,8 +335,6 @@ def render_tab_overview(tabs: Dict[int, Dict[str, Any]]) -> None:
     """
     import streamlit as st
 
-    st.subheader("Browser Tabs")
-
     if not tabs:
         st.info("No tabs open")
         return

@@ -94,18 +94,49 @@ def init_session_state():
 
 
 # Thread-safe queues for cross-thread communication
+# Using a class to ensure singleton behavior across Streamlit reruns
 import queue
 import threading
-_log_queue = queue.Queue()
-_thought_queue = queue.Queue()
-_result_queue = queue.Queue()
-_step_queue = queue.Queue()
-_screenshot_queue = queue.Queue()
-_tabs_queue = queue.Queue()
-_hitl_request_queue = queue.Queue()
-_hitl_response_event = threading.Event()
-_hitl_response_value = None
-_stop_flag = threading.Event()
+
+class _QueueManager:
+    """Singleton queue manager to persist across Streamlit reruns"""
+    _instance = None
+    _lock = threading.Lock()
+
+    def __new__(cls):
+        if cls._instance is None:
+            with cls._lock:
+                if cls._instance is None:
+                    cls._instance = super().__new__(cls)
+                    cls._instance._initialized = False
+        return cls._instance
+
+    def __init__(self):
+        if self._initialized:
+            return
+        self.log_queue = queue.Queue()
+        self.thought_queue = queue.Queue()
+        self.result_queue = queue.Queue()
+        self.step_queue = queue.Queue()
+        self.screenshot_queue = queue.Queue()
+        self.tabs_queue = queue.Queue()
+        self.hitl_request_queue = queue.Queue()
+        self.hitl_response_event = threading.Event()
+        self.hitl_response_value = None
+        self.stop_flag = threading.Event()
+        self._initialized = True
+
+# Get singleton instance
+_queues = _QueueManager()
+_log_queue = _queues.log_queue
+_thought_queue = _queues.thought_queue
+_result_queue = _queues.result_queue
+_step_queue = _queues.step_queue
+_screenshot_queue = _queues.screenshot_queue
+_tabs_queue = _queues.tabs_queue
+_hitl_request_queue = _queues.hitl_request_queue
+_hitl_response_event = _queues.hitl_response_event
+_stop_flag = _queues.stop_flag
 
 
 def add_thought(stage: str, content: str):
@@ -218,8 +249,6 @@ def status_callback(status: Dict[str, Any]):
 
 def hitl_callback(action: Dict[str, Any], screenshot: bytes) -> bool:
     """Callback for HITL approval requests (thread-safe)"""
-    global _hitl_response_value
-
     # Queue the HITL request
     _hitl_request_queue.put({
         "action": action,
@@ -228,20 +257,19 @@ def hitl_callback(action: Dict[str, Any], screenshot: bytes) -> bool:
 
     # Clear the event and wait for response
     _hitl_response_event.clear()
-    _hitl_response_value = None
+    _queues.hitl_response_value = None
 
     # Wait for user response with timeout
     timeout = 300  # 5 minute timeout
     if _hitl_response_event.wait(timeout=timeout):
-        return _hitl_response_value == "approve"
+        return _queues.hitl_response_value == "approve"
 
     return False
 
 
 def set_hitl_response(response: str):
     """Set HITL response from main thread"""
-    global _hitl_response_value
-    _hitl_response_value = response
+    _queues.hitl_response_value = response
     _hitl_response_event.set()
 
 
@@ -407,10 +435,24 @@ def main():
 
         screenshot_container = st.empty()
 
-        if st.session_state.current_screenshot:
+        # Try to get screenshot from session state first
+        screenshot_bytes = st.session_state.current_screenshot
+
+        # Fallback: try to load latest screenshot from disk
+        if not screenshot_bytes and st.session_state.agent_running:
+            try:
+                screenshot_dir = Path("data/screenshots")
+                if screenshot_dir.exists():
+                    screenshots = sorted(screenshot_dir.glob("*.png"), key=lambda p: p.stat().st_mtime, reverse=True)
+                    if screenshots:
+                        screenshot_bytes = screenshots[0].read_bytes()
+            except Exception:
+                pass
+
+        if screenshot_bytes:
             with screenshot_container:
                 st.image(
-                    Image.open(io.BytesIO(st.session_state.current_screenshot)),
+                    Image.open(io.BytesIO(screenshot_bytes)),
                     caption="Current Page",
                     use_container_width=True,
                 )
