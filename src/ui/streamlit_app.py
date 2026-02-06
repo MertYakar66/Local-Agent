@@ -94,26 +94,13 @@ def init_session_state():
 
 
 # Thread-safe queues for cross-thread communication
-# Using a class to ensure singleton behavior across Streamlit reruns
+# Using Streamlit's cache_resource to ensure persistence across reruns
 import queue
 import threading
 
 class _QueueManager:
-    """Singleton queue manager to persist across Streamlit reruns"""
-    _instance = None
-    _lock = threading.Lock()
-
-    def __new__(cls):
-        if cls._instance is None:
-            with cls._lock:
-                if cls._instance is None:
-                    cls._instance = super().__new__(cls)
-                    cls._instance._initialized = False
-        return cls._instance
-
+    """Queue manager with all queues for cross-thread communication"""
     def __init__(self):
-        if self._initialized:
-            return
         self.log_queue = queue.Queue()
         self.thought_queue = queue.Queue()
         self.result_queue = queue.Queue()
@@ -124,10 +111,15 @@ class _QueueManager:
         self.hitl_response_event = threading.Event()
         self.hitl_response_value = None
         self.stop_flag = threading.Event()
-        self._initialized = True
+        print("[DEBUG] QueueManager created!")
 
-# Get singleton instance
-_queues = _QueueManager()
+@st.cache_resource
+def get_queue_manager() -> _QueueManager:
+    """Get the singleton queue manager - cached across all Streamlit reruns"""
+    return _QueueManager()
+
+# Get singleton instance using Streamlit's caching
+_queues = get_queue_manager()
 _log_queue = _queues.log_queue
 _thought_queue = _queues.thought_queue
 _result_queue = _queues.result_queue
@@ -159,25 +151,34 @@ def add_log(level: str, message: str):
 
 def process_queues():
     """Process queued updates from background threads"""
+    processed_any = False
+
     # Process logs
     while not _log_queue.empty():
         try:
             log = _log_queue.get_nowait()
             if "logs" in st.session_state:
                 st.session_state.logs.append(log)
+            processed_any = True
         except queue.Empty:
             break
 
     # Process thoughts
+    thought_count = 0
     while not _thought_queue.empty():
         try:
             thought = _thought_queue.get_nowait()
             if "thoughts" in st.session_state:
                 st.session_state.thoughts.append(thought)
+            thought_count += 1
         except queue.Empty:
             break
+    if thought_count:
+        print(f"[DEBUG] Processed {thought_count} thoughts")
+        processed_any = True
 
     # Process steps
+    step_count = 0
     while not _step_queue.empty():
         try:
             step_update = _step_queue.get_nowait()
@@ -187,31 +188,48 @@ def process_queues():
                     st.session_state.steps.append({})
                 if step_num > 0:
                     st.session_state.steps[step_num - 1] = step_update
+                step_count += 1
         except queue.Empty:
             break
+    if step_count:
+        print(f"[DEBUG] Processed {step_count} steps, total steps now: {len(st.session_state.steps)}")
+        processed_any = True
 
     # Process screenshots
+    screenshot_count = 0
     while not _screenshot_queue.empty():
         try:
             screenshot = _screenshot_queue.get_nowait()
             st.session_state.current_screenshot = screenshot
+            screenshot_count += 1
         except queue.Empty:
             break
+    if screenshot_count:
+        screenshot_size = len(st.session_state.current_screenshot) if st.session_state.current_screenshot else 0
+        print(f"[DEBUG] Processed {screenshot_count} screenshots, final size: {screenshot_size} bytes")
+        processed_any = True
 
     # Process tabs
+    tabs_count = 0
     while not _tabs_queue.empty():
         try:
             tabs = _tabs_queue.get_nowait()
             if "tabs" in st.session_state:
                 st.session_state.tabs = tabs
+            tabs_count += 1
         except queue.Empty:
             break
+    if tabs_count:
+        tab_keys = list(st.session_state.tabs.keys()) if st.session_state.tabs else []
+        print(f"[DEBUG] Processed {tabs_count} tab updates, tabs now: {tab_keys}")
+        processed_any = True
 
     # Process HITL requests
     while not _hitl_request_queue.empty():
         try:
             hitl_request = _hitl_request_queue.get_nowait()
             st.session_state.hitl_pending = hitl_request
+            processed_any = True
         except queue.Empty:
             break
 
@@ -221,13 +239,20 @@ def process_queues():
             result = _result_queue.get_nowait()
             st.session_state.task_result = result
             st.session_state.agent_running = False
+            print(f"[DEBUG] Task result received: success={result.get('success')}")
+            processed_any = True
         except queue.Empty:
             break
+
+    return processed_any
 
 
 def status_callback(status: Dict[str, Any]):
     """Callback for agent status updates (thread-safe)"""
     stage = status.get("stage", "")
+
+    # Debug: Log callback invocations
+    print(f"[DEBUG] status_callback called: stage={stage}, has_screenshot={bool(status.get('screenshot'))}, has_tabs={bool(status.get('tabs'))}")
 
     # Don't log screenshot bytes in thought
     status_for_thought = {k: v for k, v in status.items() if k != "screenshot"}
@@ -237,14 +262,19 @@ def status_callback(status: Dict[str, Any]):
         step = status["current_step"]
         # Queue step update instead of direct access
         _step_queue.put(step)
+        print(f"[DEBUG] Queued step: {step.get('step', 'N/A')} - {step.get('description', 'N/A')[:50]}")
 
     if "screenshot" in status and status["screenshot"]:
         # Queue screenshot update
-        _screenshot_queue.put(status["screenshot"])
+        screenshot_data = status["screenshot"]
+        _screenshot_queue.put(screenshot_data)
+        print(f"[DEBUG] Queued screenshot: {len(screenshot_data)} bytes")
 
     if "tabs" in status and status["tabs"]:
         # Queue tabs update
-        _tabs_queue.put(status["tabs"])
+        tabs_data = status["tabs"]
+        _tabs_queue.put(tabs_data)
+        print(f"[DEBUG] Queued tabs: {list(tabs_data.keys()) if isinstance(tabs_data, dict) else 'invalid'}")
 
 
 def hitl_callback(action: Dict[str, Any], screenshot: bytes) -> bool:
@@ -370,7 +400,10 @@ def main():
     init_session_state()
 
     # Process any queued updates from background threads
-    process_queues()
+    # Call it twice to ensure all data is processed
+    processed = process_queues()
+    if processed:
+        print(f"[DEBUG] main(): Processed queue updates")
 
     # Header
     st.title("🤖 Autonomous Browser Agent")
@@ -426,6 +459,29 @@ def main():
         else:
             st.info("No browser tabs open yet")
 
+        st.divider()
+
+        # Debug panel
+        with st.expander("🐛 Debug Info", expanded=False):
+            st.write(f"**Agent Running**: {st.session_state.agent_running}")
+            st.write(f"**Current Task**: {st.session_state.current_task}")
+            st.write(f"**Steps Count**: {len(st.session_state.steps)}")
+            st.write(f"**Thoughts Count**: {len(st.session_state.thoughts)}")
+            st.write(f"**Tabs**: {list(st.session_state.tabs.keys()) if st.session_state.tabs else 'None'}")
+            has_screenshot = st.session_state.current_screenshot is not None
+            screenshot_size = len(st.session_state.current_screenshot) if has_screenshot else 0
+            st.write(f"**Screenshot**: {'Yes' if has_screenshot else 'No'} ({screenshot_size} bytes)")
+            st.write(f"**Task Result**: {st.session_state.task_result}")
+
+            # Queue status
+            st.write("---")
+            st.write(f"**Log Queue Size**: {_log_queue.qsize()}")
+            st.write(f"**Thought Queue Size**: {_thought_queue.qsize()}")
+            st.write(f"**Step Queue Size**: {_step_queue.qsize()}")
+            st.write(f"**Screenshot Queue Size**: {_screenshot_queue.qsize()}")
+            st.write(f"**Tabs Queue Size**: {_tabs_queue.qsize()}")
+            st.write(f"**Result Queue Size**: {_result_queue.qsize()}")
+
     # Main content area
     col1, col2 = st.columns([3, 2])
 
@@ -441,24 +497,29 @@ def main():
         # Fallback: try to load latest screenshot from disk
         if not screenshot_bytes and st.session_state.agent_running:
             try:
-                screenshot_dir = Path("data/screenshots")
+                # Use correct path from config (logs/screenshots or config.screenshots_dir)
+                screenshot_dir = config.screenshots_dir
                 if screenshot_dir.exists():
                     screenshots = sorted(screenshot_dir.glob("*.png"), key=lambda p: p.stat().st_mtime, reverse=True)
                     if screenshots:
                         screenshot_bytes = screenshots[0].read_bytes()
-            except Exception:
-                pass
+                        print(f"[DEBUG] Loaded fallback screenshot from disk: {screenshots[0]}")
+            except Exception as e:
+                print(f"[DEBUG] Failed to load fallback screenshot: {e}")
 
         if screenshot_bytes:
             with screenshot_container:
                 st.image(
                     Image.open(io.BytesIO(screenshot_bytes)),
-                    caption="Current Page",
+                    caption=f"Current Page ({len(screenshot_bytes):,} bytes)",
                     use_container_width=True,
                 )
         else:
             with screenshot_container:
-                st.info("No screenshot available. Start a task to begin.")
+                if st.session_state.agent_running:
+                    st.warning("⏳ Waiting for screenshot from agent...")
+                else:
+                    st.info("No screenshot available. Start a task to begin.")
 
         # Current task
         if st.session_state.current_task:
@@ -517,10 +578,12 @@ def main():
         agent_thread = getattr(st.session_state, 'agent_thread', None)
         if agent_thread and not agent_thread.is_alive():
             # Thread finished, process remaining queues
+            print("[DEBUG] Agent thread finished, processing remaining queues...")
             process_queues()
             st.session_state.agent_running = False
+            st.rerun()  # Final rerun to show results
 
-        time.sleep(0.3)  # Shorter interval for more responsive updates
+        time.sleep(0.2)  # Shorter interval for more responsive updates
         st.rerun()
 
 
