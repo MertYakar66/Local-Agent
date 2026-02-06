@@ -550,10 +550,14 @@ class AgentOrchestrator:
                 if attempt > 0:
                     action_context = f"Previous attempt {attempt} failed: {last_error}"
 
+                # For fill actions, pass the value from the plan step
+                fill_value = step.value if step.action == "fill" else None
+
                 action = await self.vision_actor.get_action(
                     screenshot_bytes=screenshot_before,
                     step_description=step.description,
                     current_url=tab_state.current_url,
+                    fill_value=fill_value,
                     additional_context=action_context,
                 )
 

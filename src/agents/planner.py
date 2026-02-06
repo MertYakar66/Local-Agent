@@ -31,6 +31,7 @@ class TaskStep:
     target: str
     tab: int
     verification_criteria: str
+    value: Optional[str] = None  # Text to fill for fill actions
     status: str = "pending"  # pending, in_progress, completed, failed
     result: Optional[Dict[str, Any]] = None
     error: Optional[str] = None
@@ -44,6 +45,7 @@ class TaskStep:
             "target": self.target,
             "tab": self.tab,
             "verification_criteria": self.verification_criteria,
+            "value": self.value,
             "status": self.status,
             "result": self.result,
             "error": self.error,
@@ -59,6 +61,7 @@ class TaskStep:
             target=data.get("target", ""),
             tab=data.get("tab", 0),
             verification_criteria=data.get("verification_criteria", ""),
+            value=data.get("value"),
             status=data.get("status", "pending"),
             result=data.get("result"),
             error=data.get("error"),
@@ -120,7 +123,7 @@ PLANNER_PROMPT_TEMPLATE = """You are a task planner. Output ONLY a valid JSON ar
 Task: {user_goal}
 
 Required JSON format:
-[{{"step":1,"action":"navigate","target":"https://example.com","tab":0,"description":"Go to example.com","verification_criteria":"URL contains example.com"}}]
+[{{"step":1,"action":"navigate","target":"https://example.com","tab":0,"description":"Go to example.com","value":null,"verification_criteria":"URL contains example.com"}}]
 
 Available actions: navigate, click, fill, extract, scroll, wait
 
@@ -128,7 +131,11 @@ Rules:
 - Output ONLY the JSON array, no explanation
 - Always include https:// in URLs
 - Use tab 0 for single-tab tasks
+- For "fill" actions, put the text to type in the "value" field
 - Keep plans simple (1-3 steps for basic tasks)
+
+Example for "Search for cats on Wikipedia":
+[{{"step":1,"action":"navigate","target":"https://www.wikipedia.org","tab":0,"description":"Go to Wikipedia","value":null,"verification_criteria":"URL contains wikipedia"}},{{"step":2,"action":"fill","target":"search input","tab":0,"description":"Type search term","value":"cats","verification_criteria":"Search box contains text"}},{{"step":3,"action":"click","target":"search button","tab":0,"description":"Click search","value":null,"verification_criteria":"Results page loads"}}]
 
 JSON array:"""
 

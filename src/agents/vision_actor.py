@@ -64,8 +64,18 @@ class ActionOutput:
         }
 
     @classmethod
-    def from_dict(cls, data: Dict[str, Any]) -> "ActionOutput":
-        """Create from dictionary"""
+    def from_dict(cls, data: Any) -> "ActionOutput":
+        """Create from dictionary (handles list responses gracefully)"""
+        # Handle case where model returns a list instead of dict
+        if isinstance(data, list):
+            if len(data) > 0 and isinstance(data[0], dict):
+                data = data[0]  # Take first element
+            else:
+                raise ValueError(f"Expected dict or list of dicts, got: {type(data)}")
+
+        if not isinstance(data, dict):
+            raise ValueError(f"Expected dict, got: {type(data)}")
+
         target_data = data.get("target_element")
         target = TargetElement.from_dict(target_data) if target_data else None
 
@@ -107,7 +117,7 @@ class ActionOutput:
 VISION_ACTION_PROMPT_TEMPLATE = """You are a Vision-Action agent. You see a screenshot and must output ONE precise browser action.
 
 CURRENT TASK: {step_description}
-WEBPAGE URL: {current_url}
+WEBPAGE URL: {current_url}{fill_value_instruction}
 SCREENSHOT: [base64 image attached]
 
 Analyze the screenshot and respond ONLY with JSON in this EXACT format:
@@ -127,7 +137,7 @@ IMPORTANT RULES:
 2. x1,y1 = top-left corner, x2,y2 = bottom-right corner
 3. Only respond with ONE action (not a list)
 4. If you cannot find the element, set confidence to 0.0 and explain in reasoning
-5. For "extract" actions, describe what data to extract (e.g., "price text in red")
+5. For "fill" actions, use the exact value provided in FILL WITH VALUE
 
 EXAMPLE:
 TASK: "Click the search button"
@@ -163,6 +173,7 @@ class VisionActorAgent(BaseAgent):
         screenshot_bytes: bytes,
         step_description: str,
         current_url: str,
+        fill_value: Optional[str] = None,
         additional_context: Optional[str] = None,
         use_cache: bool = True,
     ) -> ActionOutput:
@@ -219,10 +230,16 @@ class VisionActorAgent(BaseAgent):
         # Convert screenshot to base64
         screenshot_b64 = image_to_base64(screenshot_bytes)
 
+        # Build fill value instruction if provided
+        fill_value_instruction = ""
+        if fill_value:
+            fill_value_instruction = f"\nFILL WITH VALUE: \"{fill_value}\""
+
         # Build prompt
         prompt = VISION_ACTION_PROMPT_TEMPLATE.format(
             step_description=step_description,
             current_url=current_url,
+            fill_value_instruction=fill_value_instruction,
         )
 
         if additional_context:
@@ -237,6 +254,12 @@ class VisionActorAgent(BaseAgent):
 
         # Parse action
         action = ActionOutput.from_dict(action_data)
+
+        # Override value with fill_value if provided (ensures correct value is used)
+        if fill_value and action.action_type == "fill":
+            if action.value != fill_value:
+                logger.debug(f"[VisionActor] Overriding value '{action.value}' with provided fill_value '{fill_value}'")
+                action.value = fill_value
 
         # Validate confidence
         if action.target_element:
