@@ -146,12 +146,25 @@ class PlannerAgent(BaseAgent):
         import json
         import re
 
+        # Log raw input for debugging
+        logger.debug(f"[Planner] Parsing JSON from: {text[:200]}...")
+
         # Clean up the text
         text = text.strip()
+
+        # Remove thinking/explanation text before JSON
+        # Look for the first { character which starts the actual JSON
+        first_brace = text.find('{')
+        if first_brace > 0 and text[0] == '[':
+            # Keep the [ but remove anything between [ and {
+            text = '[' + text[first_brace:]
 
         # Fix double bracket issue: [[ -> [
         while text.startswith('[['):
             text = text[1:]
+
+        # Remove ... or other continuation markers
+        text = text.replace('...', '')
 
         # Remove any text after the JSON array ends
         # Find the matching ] for the first [
@@ -188,7 +201,7 @@ class PlannerAgent(BaseAgent):
                 return data
         except json.JSONDecodeError as e:
             logger.error(f"[Planner] JSON parse error: {e}")
-            logger.debug(f"[Planner] Raw text: {text[:500]}...")
+            logger.error(f"[Planner] Failed text: {text[:500]}")
 
         raise ValueError(f"Could not parse plan JSON from model output")
 
@@ -212,15 +225,14 @@ class PlannerAgent(BaseAgent):
         # Build prompt
         prompt = PLANNER_PROMPT_TEMPLATE.format(user_goal=user_goal)
 
-        if context:
-            prompt = f"CONTEXT:\n{context}\n\n{prompt}"
+        # Don't add context - it makes the model too verbose
+        # The prompt is already optimized for direct JSON output
 
         # Generate plan (no images needed for planning)
-        # Use lower max_tokens since we just need a JSON array
         response = await self.generate(
             prompt=prompt,
-            temperature=0.2,  # Low temperature for consistent planning
-            max_tokens=1024,  # Limit output to prevent rambling
+            temperature=0.1,  # Very low temperature for consistent JSON
+            max_tokens=512,  # Keep short - plans should be concise
         )
 
         # The prompt ends with "[" so we need to prepend it
