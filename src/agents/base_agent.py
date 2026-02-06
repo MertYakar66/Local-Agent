@@ -116,6 +116,14 @@ class BaseAgent:
             result = response.json()
             generated_text = result.get("response", "")
 
+            # Debug: Log if response is empty but tokens were generated
+            eval_count = result.get("eval_count", 0)
+            if eval_count > 0 and not generated_text:
+                logger.warning(
+                    f"[{self.agent_name}] Generated {eval_count} tokens but response is empty! "
+                    f"API result keys: {list(result.keys())}"
+                )
+
             # Log performance metrics
             total_duration = result.get("total_duration", 0) / 1e9  # nanoseconds to seconds
             eval_count = result.get("eval_count", 0)

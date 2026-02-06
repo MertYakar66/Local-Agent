@@ -114,20 +114,23 @@ class TaskPlan:
 
 
 # Planner prompt template - optimized for JSON output
-PLANNER_PROMPT_TEMPLATE = """/no_think
-Output ONLY a JSON array. No explanation. No markdown. Just JSON.
+# Note: Removed /no_think as it may cause empty responses with some model versions
+PLANNER_PROMPT_TEMPLATE = """You are a task planner. Output ONLY a valid JSON array with no other text.
 
 Task: {user_goal}
 
-Format: [{{"step":1,"action":"navigate","target":"url","tab":0,"description":"desc","verification_criteria":"criteria"}}]
+Required JSON format:
+[{{"step":1,"action":"navigate","target":"https://example.com","tab":0,"description":"Go to example.com","verification_criteria":"URL contains example.com"}}]
 
-Actions: navigate, click, fill, extract, synthesize
+Available actions: navigate, click, fill, extract, scroll, wait
 
-Example for "search wikipedia for AI":
-[{{"step":1,"action":"navigate","target":"wikipedia.org","tab":0,"description":"Open Wikipedia","verification_criteria":"URL contains wikipedia"}},{{"step":2,"action":"fill","target":"search box","tab":0,"description":"Enter search term","verification_criteria":"Text entered"}},{{"step":3,"action":"click","target":"search button","tab":0,"description":"Submit search","verification_criteria":"Results page loads"}}]
+Rules:
+- Output ONLY the JSON array, no explanation
+- Always include https:// in URLs
+- Use tab 0 for single-tab tasks
+- Keep plans simple (1-3 steps for basic tasks)
 
-Now output JSON array for: {user_goal}
-["""
+JSON array:"""
 
 
 class PlannerAgent(BaseAgent):
@@ -147,17 +150,45 @@ class PlannerAgent(BaseAgent):
         import re
 
         # Log raw input for debugging
-        logger.debug(f"[Planner] Parsing JSON from: {text[:200]}...")
+        logger.debug(f"[Planner] Parsing JSON from: {text[:300]}...")
 
         # Clean up the text
         text = text.strip()
 
-        # Remove thinking/explanation text before JSON
-        # Look for the first { character which starts the actual JSON
-        first_brace = text.find('{')
-        if first_brace > 0 and text[0] == '[':
-            # Keep the [ but remove anything between [ and {
-            text = '[' + text[first_brace:]
+        # Remove common prefixes that models add
+        prefixes_to_remove = [
+            "```json", "```", "Here is", "Here's", "The JSON", "JSON:",
+            "Output:", "Result:", "Answer:", "Plan:"
+        ]
+        for prefix in prefixes_to_remove:
+            if text.lower().startswith(prefix.lower()):
+                text = text[len(prefix):].strip()
+
+        # Find the JSON array in the text
+        # Look for [ ... ] pattern
+        start_idx = text.find('[')
+        if start_idx == -1:
+            # No array found, maybe it's wrapped differently
+            logger.warning(f"[Planner] No JSON array found in: {text[:200]}")
+            raise ValueError("No JSON array found in model output")
+
+        # Find the matching closing bracket
+        bracket_count = 0
+        end_idx = -1
+        for i in range(start_idx, len(text)):
+            if text[i] == '[':
+                bracket_count += 1
+            elif text[i] == ']':
+                bracket_count -= 1
+                if bracket_count == 0:
+                    end_idx = i + 1
+                    break
+
+        if end_idx == -1:
+            # No matching bracket, try to complete the JSON
+            text = text[start_idx:] + ']'
+        else:
+            text = text[start_idx:end_idx]
 
         # Fix double bracket issue: [[ -> [
         while text.startswith('[['):
@@ -166,26 +197,11 @@ class PlannerAgent(BaseAgent):
         # Remove ... or other continuation markers
         text = text.replace('...', '')
 
-        # Remove any text after the JSON array ends
-        # Find the matching ] for the first [
-        bracket_count = 0
-        end_pos = 0
-        for i, char in enumerate(text):
-            if char == '[':
-                bracket_count += 1
-            elif char == ']':
-                bracket_count -= 1
-                if bracket_count == 0:
-                    end_pos = i + 1
-                    break
-
-        if end_pos > 0:
-            text = text[:end_pos]
-
         # Try direct parse
         try:
             data = json.loads(text)
             if isinstance(data, list):
+                logger.debug(f"[Planner] Successfully parsed {len(data)} steps")
                 return data
         except json.JSONDecodeError:
             pass
@@ -195,9 +211,13 @@ class PlannerAgent(BaseAgent):
         text = re.sub(r',\s*]', ']', text)
         text = re.sub(r',\s*}', '}', text)
 
+        # Fix unquoted keys (some models do this)
+        text = re.sub(r'(\{|,)\s*(\w+)\s*:', r'\1"\2":', text)
+
         try:
             data = json.loads(text)
             if isinstance(data, list):
+                logger.debug(f"[Planner] Successfully parsed {len(data)} steps after fixes")
                 return data
         except json.JSONDecodeError as e:
             logger.error(f"[Planner] JSON parse error: {e}")
@@ -236,14 +256,14 @@ class PlannerAgent(BaseAgent):
         )
 
         # Log raw response for debugging
-        logger.debug(f"[Planner] Raw response: {response[:300] if response else 'EMPTY'}...")
+        logger.debug(f"[Planner] Raw response: {response[:500] if response else 'EMPTY'}...")
 
         # Handle empty response
         if not response or not response.strip():
             raise ValueError("Model returned empty response")
 
-        # The prompt ends with "[" so we need to prepend it
-        json_text = "[" + response
+        # Try to parse JSON directly (prompt no longer ends with "[")
+        json_text = response.strip()
 
         # Try to parse JSON
         steps_data = self._parse_plan_json(json_text)
