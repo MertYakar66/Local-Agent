@@ -36,7 +36,7 @@ def render_screenshot(
         st.info("No screenshot available")
         return
 
-    st.image(image, caption=caption, use_container_width=width is None)
+    st.image(image, caption=caption, width="stretch" if width is None else "content")
 
 
 def render_step_history(
@@ -114,7 +114,7 @@ def render_hitl_approval(
         st.image(
             Image.open(io.BytesIO(screenshot_bytes)),
             caption="Screenshot of target element",
-            use_container_width=True,
+            width="stretch",
         )
 
     # Show action details

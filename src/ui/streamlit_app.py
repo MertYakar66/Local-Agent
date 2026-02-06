@@ -512,7 +512,7 @@ def main():
                 st.image(
                     Image.open(io.BytesIO(screenshot_bytes)),
                     caption=f"Current Page ({len(screenshot_bytes):,} bytes)",
-                    use_container_width=True,
+                    width="stretch",
                 )
         else:
             with screenshot_container:
