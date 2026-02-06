@@ -116,19 +116,23 @@ class TaskPlan:
         }
 
 
-# Planner prompt template - concise to encourage direct JSON output
-PLANNER_PROMPT_TEMPLATE = """Output a JSON array for this task. No explanation, just JSON.
+# Planner prompt template - request complete JSON object with steps array
+PLANNER_PROMPT_TEMPLATE = """Return a complete JSON object with a "steps" array for this browser automation task.
 
 Task: {user_goal}
 
-Format: [{{"step":N,"action":"TYPE","target":"TARGET","tab":0,"description":"DESC","value":"TEXT_FOR_FILL_OR_NULL","verification_criteria":"CHECK"}}]
-Actions: navigate (target=URL), fill (value=text to type), click (target=button/link)
+Required format:
+{{"steps":[{{"step":1,"action":"ACTION","target":"TARGET","tab":0,"description":"DESC","value":"TEXT_OR_NULL","verification_criteria":"CHECK"}},{{"step":2,...}},{{"step":3,...}}]}}
+
+Actions:
+- navigate: target=URL to open
+- fill: target=element description, value=text to type
+- click: target=button/link to click
 
 Example for "Search cats on Wikipedia":
-[{{"step":1,"action":"navigate","target":"https://www.wikipedia.org","tab":0,"description":"Open Wikipedia","value":null,"verification_criteria":"wikipedia in URL"}},{{"step":2,"action":"fill","target":"search box","tab":0,"description":"Type search","value":"cats","verification_criteria":"text entered"}},{{"step":3,"action":"click","target":"search button","tab":0,"description":"Search","value":null,"verification_criteria":"results load"}}]
+{{"steps":[{{"step":1,"action":"navigate","target":"https://www.wikipedia.org","tab":0,"description":"Open Wikipedia","value":null,"verification_criteria":"wikipedia in URL"}},{{"step":2,"action":"fill","target":"search box","tab":0,"description":"Type cats in search","value":"cats","verification_criteria":"text entered"}},{{"step":3,"action":"click","target":"search button","tab":0,"description":"Click search","value":null,"verification_criteria":"results page loads"}}]}}
 
-JSON for "{user_goal}":
-["""
+Generate the complete JSON object for: {user_goal}"""
 
 
 class PlannerAgent(BaseAgent):
@@ -162,65 +166,108 @@ class PlannerAgent(BaseAgent):
             if text.lower().startswith(prefix.lower()):
                 text = text[len(prefix):].strip()
 
-        # Find the JSON array in the text
-        # Look for [ ... ] pattern
-        start_idx = text.find('[')
-        if start_idx == -1:
-            # No array found, maybe it's wrapped differently
-            logger.warning(f"[Planner] No JSON array found in: {text[:200]}")
-            raise ValueError("No JSON array found in model output")
+        # Remove trailing ``` if present
+        if text.endswith("```"):
+            text = text[:-3].strip()
 
-        # Find the matching closing bracket
-        bracket_count = 0
-        end_idx = -1
-        for i in range(start_idx, len(text)):
-            if text[i] == '[':
-                bracket_count += 1
-            elif text[i] == ']':
-                bracket_count -= 1
-                if bracket_count == 0:
-                    end_idx = i + 1
-                    break
-
-        if end_idx == -1:
-            # No matching bracket, try to complete the JSON
-            text = text[start_idx:] + ']'
-        else:
-            text = text[start_idx:end_idx]
-
-        # Fix double bracket issue: [[ -> [
-        while text.startswith('[['):
-            text = text[1:]
-
-        # Remove ... or other continuation markers
-        text = text.replace('...', '')
-
-        # Try direct parse
+        # Try to parse as a complete JSON object first (new format with "steps" array)
         try:
             data = json.loads(text)
-            if isinstance(data, list):
-                logger.debug(f"[Planner] Successfully parsed {len(data)} steps")
+            if isinstance(data, dict) and "steps" in data:
+                steps = data["steps"]
+                if isinstance(steps, list):
+                    logger.debug(f"[Planner] Successfully parsed {len(steps)} steps from object format")
+                    return steps
+            elif isinstance(data, list):
+                logger.debug(f"[Planner] Successfully parsed {len(data)} steps from array format")
                 return data
         except json.JSONDecodeError:
             pass
 
-        # Try to fix common JSON issues
-        # Remove trailing commas
-        text = re.sub(r',\s*]', ']', text)
-        text = re.sub(r',\s*}', '}', text)
+        # Find JSON object or array in the text
+        obj_start = text.find('{')
+        arr_start = text.find('[')
 
-        # Fix unquoted keys (some models do this)
-        text = re.sub(r'(\{|,)\s*(\w+)\s*:', r'\1"\2":', text)
+        # Prefer object format (with steps array) over raw array
+        if obj_start != -1 and (arr_start == -1 or obj_start < arr_start):
+            # Try to extract JSON object
+            start_idx = obj_start
+            bracket_count = 0
+            end_idx = -1
+            for i in range(start_idx, len(text)):
+                if text[i] == '{':
+                    bracket_count += 1
+                elif text[i] == '}':
+                    bracket_count -= 1
+                    if bracket_count == 0:
+                        end_idx = i + 1
+                        break
 
-        try:
-            data = json.loads(text)
-            if isinstance(data, list):
-                logger.debug(f"[Planner] Successfully parsed {len(data)} steps after fixes")
-                return data
-        except json.JSONDecodeError as e:
-            logger.error(f"[Planner] JSON parse error: {e}")
-            logger.error(f"[Planner] Failed text: {text[:500]}")
+            if end_idx != -1:
+                obj_text = text[start_idx:end_idx]
+                try:
+                    data = json.loads(obj_text)
+                    if isinstance(data, dict) and "steps" in data:
+                        steps = data["steps"]
+                        if isinstance(steps, list):
+                            logger.debug(f"[Planner] Successfully extracted {len(steps)} steps from object")
+                            return steps
+                except json.JSONDecodeError:
+                    pass
 
+        # Fall back to array format
+        if arr_start != -1:
+            start_idx = arr_start
+            bracket_count = 0
+            end_idx = -1
+            for i in range(start_idx, len(text)):
+                if text[i] == '[':
+                    bracket_count += 1
+                elif text[i] == ']':
+                    bracket_count -= 1
+                    if bracket_count == 0:
+                        end_idx = i + 1
+                        break
+
+            if end_idx == -1:
+                text = text[start_idx:] + ']'
+            else:
+                text = text[start_idx:end_idx]
+
+            # Fix double bracket issue: [[ -> [
+            while text.startswith('[['):
+                text = text[1:]
+
+            # Remove ... or other continuation markers
+            text = text.replace('...', '')
+
+            # Try direct parse
+            try:
+                data = json.loads(text)
+                if isinstance(data, list):
+                    logger.debug(f"[Planner] Successfully parsed {len(data)} steps from array")
+                    return data
+            except json.JSONDecodeError:
+                pass
+
+            # Try to fix common JSON issues
+            # Remove trailing commas
+            text = re.sub(r',\s*]', ']', text)
+            text = re.sub(r',\s*}', '}', text)
+
+            # Fix unquoted keys (some models do this)
+            text = re.sub(r'(\{|,)\s*(\w+)\s*:', r'\1"\2":', text)
+
+            try:
+                data = json.loads(text)
+                if isinstance(data, list):
+                    logger.debug(f"[Planner] Successfully parsed {len(data)} steps after fixes")
+                    return data
+            except json.JSONDecodeError as e:
+                logger.error(f"[Planner] JSON parse error: {e}")
+                logger.error(f"[Planner] Failed text: {text[:500]}")
+
+        logger.error(f"[Planner] No valid JSON found in: {text[:200]}")
         raise ValueError(f"Could not parse plan JSON from model output")
 
     async def decompose_task(
@@ -262,8 +309,8 @@ class PlannerAgent(BaseAgent):
         if not response or not response.strip():
             raise ValueError("Model returned empty response")
 
-        # The prompt ends with "[" so prepend it to complete the array
-        json_text = "[" + response.strip()
+        # Parse JSON directly - the prompt now requests a complete JSON object
+        json_text = response.strip()
 
         # Try to parse JSON
         steps_data = self._parse_plan_json(json_text)
