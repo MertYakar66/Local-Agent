@@ -247,10 +247,12 @@ class PlannerAgent(BaseAgent):
         # The prompt is already optimized for direct JSON output
 
         # Generate plan (no images needed for planning)
+        # Use json_mode to force JSON output and bypass thinking mode
         response = await self.generate(
             prompt=prompt,
             temperature=0.1,  # Very low temperature for consistent JSON
             max_tokens=1024,  # Allow enough tokens for complete JSON
+            json_mode=True,  # Force JSON output format
         )
 
         # Log raw response for debugging

@@ -76,6 +76,7 @@ class BaseAgent:
         images: Optional[List[str]] = None,
         temperature: Optional[float] = None,
         max_tokens: int = 4096,
+        json_mode: bool = False,
     ) -> str:
         """
         Generate response from Ollama.
@@ -85,6 +86,7 @@ class BaseAgent:
             images: Optional list of base64-encoded images
             temperature: Override default temperature
             max_tokens: Maximum tokens to generate
+            json_mode: If True, force JSON output format (helps bypass thinking mode)
 
         Returns:
             Generated text response
@@ -102,6 +104,10 @@ class BaseAgent:
                 "num_ctx": self.llm_config.context_length,
             },
         }
+
+        # Force JSON output format (helps with qwen3-vl thinking mode)
+        if json_mode:
+            payload["format"] = "json"
 
         # Add images for vision model
         if images:
