@@ -47,7 +47,7 @@ class TargetElement:
 @dataclass
 class ActionOutput:
     """Output from the Vision-Action agent"""
-    action_type: str  # click, fill, scroll, extract, wait
+    action_type: str  # click, fill, scroll, extract, wait, press_key
     target_element: Optional[TargetElement] = None
     value: Optional[str] = None  # Text to type for fill actions
     reasoning: str = ""
@@ -97,8 +97,8 @@ class ActionOutput:
         if self.action_type == "extract":
             return True
 
-        # Wait and scroll may not need target
-        if self.action_type in ("wait", "scroll"):
+        # Wait, scroll, and press_key may not need target
+        if self.action_type in ("wait", "scroll", "press_key"):
             return True
 
         # Click and fill need target with bbox
@@ -122,14 +122,14 @@ SCREENSHOT: [base64 image attached]
 
 Analyze the screenshot and respond ONLY with JSON in this EXACT format:
 {{
-  "action_type": "click|fill|scroll|extract|wait",
+  "action_type": "click|fill|scroll|extract|wait|press_key",
   "target_element": {{
     "description": "<what element you see>",
     "bbox": [x1, y1, x2, y2],
     "confidence": <0.0 to 1.0>
   }},
-  "value": "<text to type (only for 'fill' action)>",
-  "reasoning": "<why you chose this element>"
+  "value": "<text to type for 'fill', or key name for 'press_key' (Enter, Tab, Escape)>",
+  "reasoning": "<why you chose this action>"
 }}
 
 IMPORTANT RULES:

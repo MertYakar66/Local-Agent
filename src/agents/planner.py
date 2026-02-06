@@ -128,9 +128,10 @@ Actions:
 - navigate: target=URL to open
 - fill: target=element description, value=text to type
 - click: target=button/link to click
+- press_key: value=key to press (Enter, Tab, Escape, etc.) - USE THIS TO SUBMIT SEARCH FORMS
 
 Example for "Search cats on Wikipedia":
-{{"steps":[{{"step":1,"action":"navigate","target":"https://www.wikipedia.org","tab":0,"description":"Open Wikipedia","value":null,"verification_criteria":"wikipedia in URL"}},{{"step":2,"action":"fill","target":"search box","tab":0,"description":"Type cats in search","value":"cats","verification_criteria":"text entered"}},{{"step":3,"action":"click","target":"search button","tab":0,"description":"Click search","value":null,"verification_criteria":"results page loads"}}]}}
+{{"steps":[{{"step":1,"action":"navigate","target":"https://www.wikipedia.org","tab":0,"description":"Open Wikipedia","value":null,"verification_criteria":"wikipedia in URL"}},{{"step":2,"action":"fill","target":"search box","tab":0,"description":"Type cats in search","value":"cats","verification_criteria":"text entered"}},{{"step":3,"action":"press_key","target":"search box","tab":0,"description":"Press Enter to search","value":"Enter","verification_criteria":"results page loads"}}]}}
 
 Generate the complete JSON object for: {user_goal}"""
 

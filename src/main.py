@@ -545,21 +545,34 @@ class AgentOrchestrator:
                     suffix="before",
                 )
 
-                # Stage 2: VISION-ACTION
-                action_context = None
-                if attempt > 0:
-                    action_context = f"Previous attempt {attempt} failed: {last_error}"
+                # Stage 2: VISION-ACTION (or direct execution for press_key)
 
-                # For fill actions, pass the value from the plan step
-                fill_value = step.value if step.action == "fill" else None
+                # For press_key actions, skip vision actor and execute directly
+                if step.action == "press_key":
+                    from src.agents.vision_actor import ActionOutput
+                    key_value = step.value or "Enter"
+                    action = ActionOutput(
+                        action_type="press_key",
+                        target_element=None,
+                        value=key_value,
+                        reasoning=f"Pressing {key_value} key as per plan",
+                        confidence=1.0,
+                    )
+                else:
+                    action_context = None
+                    if attempt > 0:
+                        action_context = f"Previous attempt {attempt} failed: {last_error}"
 
-                action = await self.vision_actor.get_action(
-                    screenshot_bytes=screenshot_before,
-                    step_description=step.description,
-                    current_url=tab_state.current_url,
-                    fill_value=fill_value,
-                    additional_context=action_context,
-                )
+                    # For fill actions, pass the value from the plan step
+                    fill_value = step.value if step.action == "fill" else None
+
+                    action = await self.vision_actor.get_action(
+                        screenshot_bytes=screenshot_before,
+                        step_description=step.description,
+                        current_url=tab_state.current_url,
+                        fill_value=fill_value,
+                        additional_context=action_context,
+                    )
 
                 # Validate action
                 if not action.is_valid:
