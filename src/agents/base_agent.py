@@ -116,11 +116,24 @@ class BaseAgent:
             result = response.json()
             generated_text = result.get("response", "")
 
-            # Debug: Log if response is empty but tokens were generated
+            # Handle qwen3 thinking mode: if response is empty but thinking has content,
+            # try to extract the actual output from the thinking field
+            thinking_text = result.get("thinking", "")
             eval_count = result.get("eval_count", 0)
-            if eval_count > 0 and not generated_text:
+
+            if eval_count > 0 and not generated_text and thinking_text:
                 logger.warning(
-                    f"[{self.agent_name}] Generated {eval_count} tokens but response is empty! "
+                    f"[{self.agent_name}] Response empty but thinking has {len(thinking_text)} chars. "
+                    f"Extracting from thinking field..."
+                )
+                # The model put everything in thinking - try to extract JSON or usable content
+                # Look for JSON array or object in the thinking text
+                if '[' in thinking_text or '{' in thinking_text:
+                    generated_text = thinking_text
+                    logger.debug(f"[{self.agent_name}] Using thinking field content as response")
+            elif eval_count > 0 and not generated_text:
+                logger.warning(
+                    f"[{self.agent_name}] Generated {eval_count} tokens but both response and thinking are empty! "
                     f"API result keys: {list(result.keys())}"
                 )
 
