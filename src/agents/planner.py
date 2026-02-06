@@ -116,28 +116,19 @@ class TaskPlan:
         }
 
 
-# Planner prompt template - optimized for JSON output
-# Note: Removed /no_think as it may cause empty responses with some model versions
-PLANNER_PROMPT_TEMPLATE = """You are a task planner. Output ONLY a valid JSON array with no other text.
+# Planner prompt template - concise to encourage direct JSON output
+PLANNER_PROMPT_TEMPLATE = """Output a JSON array for this task. No explanation, just JSON.
 
 Task: {user_goal}
 
-Required JSON format:
-[{{"step":1,"action":"navigate","target":"https://example.com","tab":0,"description":"Go to example.com","value":null,"verification_criteria":"URL contains example.com"}}]
+Format: [{{"step":N,"action":"TYPE","target":"TARGET","tab":0,"description":"DESC","value":"TEXT_FOR_FILL_OR_NULL","verification_criteria":"CHECK"}}]
+Actions: navigate (target=URL), fill (value=text to type), click (target=button/link)
 
-Available actions: navigate, click, fill, extract, scroll, wait
+Example for "Search cats on Wikipedia":
+[{{"step":1,"action":"navigate","target":"https://www.wikipedia.org","tab":0,"description":"Open Wikipedia","value":null,"verification_criteria":"wikipedia in URL"}},{{"step":2,"action":"fill","target":"search box","tab":0,"description":"Type search","value":"cats","verification_criteria":"text entered"}},{{"step":3,"action":"click","target":"search button","tab":0,"description":"Search","value":null,"verification_criteria":"results load"}}]
 
-Rules:
-- Output ONLY the JSON array, no explanation
-- Always include https:// in URLs
-- Use tab 0 for single-tab tasks
-- For "fill" actions, put the text to type in the "value" field
-- Keep plans simple (1-3 steps for basic tasks)
-
-Example for "Search for cats on Wikipedia":
-[{{"step":1,"action":"navigate","target":"https://www.wikipedia.org","tab":0,"description":"Go to Wikipedia","value":null,"verification_criteria":"URL contains wikipedia"}},{{"step":2,"action":"fill","target":"search input","tab":0,"description":"Type search term","value":"cats","verification_criteria":"Search box contains text"}},{{"step":3,"action":"click","target":"search button","tab":0,"description":"Click search","value":null,"verification_criteria":"Results page loads"}}]
-
-JSON array:"""
+JSON for "{user_goal}":
+["""
 
 
 class PlannerAgent(BaseAgent):
@@ -259,7 +250,7 @@ class PlannerAgent(BaseAgent):
         response = await self.generate(
             prompt=prompt,
             temperature=0.1,  # Very low temperature for consistent JSON
-            max_tokens=512,  # Keep short - plans should be concise
+            max_tokens=1024,  # Allow enough tokens for complete JSON
         )
 
         # Log raw response for debugging
@@ -269,8 +260,8 @@ class PlannerAgent(BaseAgent):
         if not response or not response.strip():
             raise ValueError("Model returned empty response")
 
-        # Try to parse JSON directly (prompt no longer ends with "[")
-        json_text = response.strip()
+        # The prompt ends with "[" so prepend it to complete the array
+        json_text = "[" + response.strip()
 
         # Try to parse JSON
         steps_data = self._parse_plan_json(json_text)
