@@ -113,43 +113,21 @@ class TaskPlan:
         }
 
 
-# Planner prompt template from specification
-PLANNER_PROMPT_TEMPLATE = """You are a Task Planner for a browser automation agent.
+# Planner prompt template - optimized for JSON output
+PLANNER_PROMPT_TEMPLATE = """/no_think
+Output ONLY a JSON array. No explanation. No markdown. Just JSON.
 
-USER GOAL: {user_goal}
+Task: {user_goal}
 
-Break this goal into a sequence of browser actions. Respond ONLY with a JSON array of steps.
+Format: [{{"step":1,"action":"navigate","target":"url","tab":0,"description":"desc","verification_criteria":"criteria"}}]
 
-Each step MUST have this format:
-{{
-  "step": <number>,
-  "action": "navigate|search|click|fill|extract|synthesize",
-  "description": "<what to do>",
-  "target": "<URL or query or element description>",
-  "tab": <tab_id (0-9)>,
-  "verification_criteria": "<how to confirm success>"
-}}
+Actions: navigate, click, fill, extract, synthesize
 
-RULES:
-1. Use multiple tabs for parallel tasks (e.g., compare 3 sites → use tabs 0, 1, 2)
-2. Add a "synthesize" step at the end to merge results
-3. Keep steps atomic (one clear action per step)
-4. Add verification criteria for every step
+Example for "search wikipedia for AI":
+[{{"step":1,"action":"navigate","target":"wikipedia.org","tab":0,"description":"Open Wikipedia","verification_criteria":"URL contains wikipedia"}},{{"step":2,"action":"fill","target":"search box","tab":0,"description":"Enter search term","verification_criteria":"Text entered"}},{{"step":3,"action":"click","target":"search button","tab":0,"description":"Submit search","verification_criteria":"Results page loads"}}]
 
-EXAMPLE:
-USER GOAL: "Compare iPhone 15 Pro prices on Amazon and B&H"
-OUTPUT:
-[
-  {{"step": 1, "action": "navigate", "target": "amazon.com", "tab": 0, "description": "Open Amazon homepage", "verification_criteria": "URL contains amazon.com"}},
-  {{"step": 2, "action": "search", "target": "iPhone 15 Pro", "tab": 0, "description": "Search for product", "verification_criteria": "Search results page loads"}},
-  {{"step": 3, "action": "extract", "target": "first result price", "tab": 0, "description": "Get price from top result", "verification_criteria": "Price stored in memory"}},
-  {{"step": 4, "action": "navigate", "target": "bhphotovideo.com", "tab": 1, "description": "Open B&H homepage", "verification_criteria": "URL contains bhphotovideo.com"}},
-  {{"step": 5, "action": "search", "target": "iPhone 15 Pro", "tab": 1, "description": "Search on B&H", "verification_criteria": "Search results page loads"}},
-  {{"step": 6, "action": "extract", "target": "first result price", "tab": 1, "description": "Get price from B&H", "verification_criteria": "Price stored in memory"}},
-  {{"step": 7, "action": "synthesize", "target": "compare prices from tabs 0 and 1", "tab": -1, "description": "Build comparison table", "verification_criteria": "Table generated"}}
-]
-
-NOW CREATE A PLAN FOR: {user_goal}"""
+Now output JSON array for: {user_goal}
+["""
 
 
 class PlannerAgent(BaseAgent):
@@ -162,6 +140,53 @@ class PlannerAgent(BaseAgent):
 
     def __init__(self, llm_config: Optional[LLMConfig] = None):
         super().__init__(llm_config=llm_config, agent_name="planner")
+
+    def _parse_plan_json(self, text: str) -> List[Dict[str, Any]]:
+        """Parse JSON plan from model output, handling common issues"""
+        import json
+        import re
+
+        # Clean up the text
+        text = text.strip()
+
+        # Remove any text after the JSON array ends
+        # Find the last ] and truncate there
+        bracket_count = 0
+        end_pos = 0
+        for i, char in enumerate(text):
+            if char == '[':
+                bracket_count += 1
+            elif char == ']':
+                bracket_count -= 1
+                if bracket_count == 0:
+                    end_pos = i + 1
+                    break
+
+        if end_pos > 0:
+            text = text[:end_pos]
+
+        # Try direct parse
+        try:
+            data = json.loads(text)
+            if isinstance(data, list):
+                return data
+        except json.JSONDecodeError:
+            pass
+
+        # Try to fix common JSON issues
+        # Remove trailing commas
+        text = re.sub(r',\s*]', ']', text)
+        text = re.sub(r',\s*}', '}', text)
+
+        try:
+            data = json.loads(text)
+            if isinstance(data, list):
+                return data
+        except json.JSONDecodeError as e:
+            logger.error(f"[Planner] JSON parse error: {e}")
+            logger.debug(f"[Planner] Raw text: {text[:500]}...")
+
+        raise ValueError(f"Could not parse plan JSON from model output")
 
     async def decompose_task(
         self,
@@ -187,10 +212,18 @@ class PlannerAgent(BaseAgent):
             prompt = f"CONTEXT:\n{context}\n\n{prompt}"
 
         # Generate plan (no images needed for planning)
-        steps_data = await self.generate_json(
+        # Use lower max_tokens since we just need a JSON array
+        response = await self.generate(
             prompt=prompt,
-            temperature=0.3,  # Low temperature for consistent planning
+            temperature=0.2,  # Low temperature for consistent planning
+            max_tokens=1024,  # Limit output to prevent rambling
         )
+
+        # The prompt ends with "[" so we need to prepend it
+        json_text = "[" + response
+
+        # Try to parse JSON
+        steps_data = self._parse_plan_json(json_text)
 
         # Parse steps
         if isinstance(steps_data, list):
