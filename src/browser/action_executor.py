@@ -121,8 +121,9 @@ def is_sensitive_action(action: Dict[str, Any], current_url: str) -> bool:
 
     Returns True if action matches sensitive patterns.
     """
-    # Check action description
-    action_text = action.get("target_element", {}).get("description", "").lower()
+    # Check action description (handle None target_element)
+    target_element = action.get("target_element") or {}
+    action_text = target_element.get("description", "").lower()
     for pattern in SENSITIVE_PATTERNS:
         if re.search(pattern, action_text, re.IGNORECASE):
             return True
@@ -254,7 +255,7 @@ class ActionExecutor:
             )
 
         # Security Check 5: Validate action
-        target_element = action.get("target_element", {})
+        target_element = action.get("target_element") or {}
         value = action.get("value")
         is_valid, validation_msg, security_level = validate_action(
             action_type,
@@ -332,7 +333,7 @@ class ActionExecutor:
         pixel_x = (bbox[0] / 1000) * viewport_size['width']
         pixel_y = (bbox[1] / 1000) * viewport_size['height']
         """
-        target = action.get("target_element", {})
+        target = action.get("target_element") or {}
         bbox = target.get("bbox", [])
 
         if not bbox or len(bbox) < 4:
@@ -379,7 +380,7 @@ class ActionExecutor:
     @with_retry(RetryConfig(max_retries=3, base_delay=2.0))
     async def _execute_fill(self, action: Dict[str, Any]) -> ActionResult:
         """Execute a fill/type action with input sanitization"""
-        target = action.get("target_element", {})
+        target = action.get("target_element") or {}
         bbox = target.get("bbox", [])
         value = action.get("value", "")
 
@@ -446,7 +447,7 @@ class ActionExecutor:
 
     async def _execute_scroll(self, action: Dict[str, Any]) -> ActionResult:
         """Execute a scroll action"""
-        target = action.get("target_element", {})
+        target = action.get("target_element") or {}
         value = action.get("value", "down")  # up, down, left, right
 
         # Parse scroll direction and amount
@@ -492,7 +493,7 @@ class ActionExecutor:
 
         Extracts text content from specified element or region.
         """
-        target = action.get("target_element", {})
+        target = action.get("target_element") or {}
         description = target.get("description", "")
 
         logger.info(f"Extracting: {description}")
@@ -586,7 +587,7 @@ class ActionExecutor:
 
     async def _execute_hover(self, action: Dict[str, Any]) -> ActionResult:
         """Execute a hover action"""
-        target = action.get("target_element", {})
+        target = action.get("target_element") or {}
         bbox = target.get("bbox", [])
 
         if not bbox or len(bbox) < 4:
@@ -612,7 +613,7 @@ class ActionExecutor:
 
     async def _execute_select(self, action: Dict[str, Any]) -> ActionResult:
         """Execute a select (dropdown) action"""
-        target = action.get("target_element", {})
+        target = action.get("target_element") or {}
         bbox = target.get("bbox", [])
         value = action.get("value", "")
 
