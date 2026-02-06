@@ -289,14 +289,8 @@ class AgentOrchestrator:
             # Stage 1: PLANNER - Decompose task into steps
             logger.info("[Stage 1] Planning task decomposition...")
 
-            # Check for similar past plans
-            similar_plans = await self.memory.find_similar_plans(user_goal, n_results=1)
-            context = None
-            if similar_plans:
-                logger.info("Found similar past plan, using as reference")
-                context = f"SIMILAR PAST PLAN (for reference):\n{similar_plans[0]}"
-
-            plan = await self.planner.decompose_task(user_goal, context=context)
+            # Skip similar plan lookup for now - it can confuse the model
+            plan = await self.planner.decompose_task(user_goal)
             self._current_plan = plan
 
             logger.info(f"Plan created with {len(plan.steps)} steps using tabs {plan.tabs_used}")

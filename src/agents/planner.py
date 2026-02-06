@@ -235,6 +235,13 @@ class PlannerAgent(BaseAgent):
             max_tokens=512,  # Keep short - plans should be concise
         )
 
+        # Log raw response for debugging
+        logger.debug(f"[Planner] Raw response: {response[:300] if response else 'EMPTY'}...")
+
+        # Handle empty response
+        if not response or not response.strip():
+            raise ValueError("Model returned empty response")
+
         # The prompt ends with "[" so we need to prepend it
         json_text = "[" + response
 
