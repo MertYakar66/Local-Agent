@@ -237,7 +237,10 @@ class ChromaManager:
         self._plans_collection.add(
             documents=[plan_memory.to_embedding_text()],
             metadatas=[{
-                **plan_memory.to_dict(),
+                "user_goal": plan_memory.user_goal,
+                "success": plan_memory.success,
+                "execution_time_seconds": plan_memory.execution_time_seconds,
+                "timestamp": plan_memory.timestamp.isoformat(),
                 "plan_json": json.dumps(plan_memory.plan_steps),
             }],
             ids=[doc_id],
