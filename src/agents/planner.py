@@ -149,8 +149,12 @@ class PlannerAgent(BaseAgent):
         # Clean up the text
         text = text.strip()
 
+        # Fix double bracket issue: [[ -> [
+        while text.startswith('[['):
+            text = text[1:]
+
         # Remove any text after the JSON array ends
-        # Find the last ] and truncate there
+        # Find the matching ] for the first [
         bracket_count = 0
         end_pos = 0
         for i, char in enumerate(text):
