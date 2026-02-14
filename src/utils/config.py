@@ -14,15 +14,26 @@ load_dotenv()
 class AgentConfig(BaseModel):
     """Central configuration for the autonomous agent
 
-    Optimized for AMD Ryzen 9800X3D + RTX 4080 Super (16GB VRAM) + 64GB DDR5
+    Supports both local (Ollama) and cloud (Claude) LLM providers.
     """
 
     # Project Paths
     base_dir: Path = Field(default_factory=lambda: Path(__file__).parent.parent.parent)
 
-    # Model Settings - Tiered Intelligence Strategy
-    # Primary model (8b): Fast, handles 95% of tasks (~40-60 tokens/sec)
-    # Fallback model (30b): Smarter, invoked when primary fails 3x
+    # LLM Provider: "claude" or "ollama"
+    llm_provider: str = Field(
+        default_factory=lambda: os.getenv("LLM_PROVIDER", "claude")
+    )
+
+    # Claude API Settings
+    anthropic_api_key: str = Field(
+        default_factory=lambda: os.getenv("ANTHROPIC_API_KEY", "")
+    )
+    claude_model: str = Field(
+        default_factory=lambda: os.getenv("CLAUDE_MODEL", "claude-sonnet-4-20250514")
+    )
+
+    # Ollama Settings (fallback / local mode)
     ollama_url: str = Field(
         default_factory=lambda: os.getenv("OLLAMA_URL", "http://localhost:11434")
     )
@@ -74,7 +85,7 @@ class AgentConfig(BaseModel):
         default_factory=lambda: float(os.getenv("ACTION_CONFIDENCE_THRESHOLD", "0.8"))
     )
 
-    # Performance Settings - Optimized for RTX 4080 Super (16GB VRAM)
+    # Performance Settings
     max_vram_gb: float = Field(
         default_factory=lambda: float(os.getenv("MAX_VRAM_GB", "15.0"))
     )
@@ -89,7 +100,7 @@ class AgentConfig(BaseModel):
         default_factory=lambda: os.getenv("LOG_LEVEL", "INFO")
     )
     save_screenshots: bool = Field(
-        default_factory=lambda: os.getenv("SAVE_SCREENSHOTS", "true").lower() == "true"
+        default_factory=lambda: os.getenv("SAVE_SCREENSHOTS", "false").lower() == "true"
     )
 
     # Sensitive action detection patterns
@@ -107,6 +118,11 @@ class AgentConfig(BaseModel):
         r".*/delete",
         r".*/admin",
     ]
+
+    @property
+    def is_claude(self) -> bool:
+        """Check if using Claude as the LLM provider"""
+        return self.llm_provider.lower() == "claude"
 
     @property
     def screenshots_dir(self) -> Path:

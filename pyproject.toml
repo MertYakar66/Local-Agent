@@ -1,7 +1,7 @@
 [project]
 name = "autonomous-browser-agent"
 version = "0.1.0"
-description = "Vision-driven autonomous browser agent with multi-tab support and human-in-the-loop controls"
+description = "Autonomous browser agent powered by Claude/Ollama + Playwright (DOM-based, no screenshots)"
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
