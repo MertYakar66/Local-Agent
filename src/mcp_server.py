@@ -484,10 +484,7 @@ try:
 except ImportError:
     pass
 
-mcp = FastMCP(
-    "browser-agent",
-    version="2.1.0",
-)
+mcp = FastMCP("browser-agent")
 
 # Module-level browser server (lazy initialization on first tool call)
 _server = MCPBrowserServer()
