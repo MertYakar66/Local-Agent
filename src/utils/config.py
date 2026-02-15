@@ -71,7 +71,6 @@ class AgentConfig(BaseModel):
     embedding_model: str = Field(
         default_factory=lambda: os.getenv("EMBEDDING_MODEL", "nomic-embed-text")
     )
-    max_stored_screenshots: int = 1000
     log_retention_days: int = 30
 
     # Safety Settings
@@ -89,9 +88,6 @@ class AgentConfig(BaseModel):
     max_vram_gb: float = Field(
         default_factory=lambda: float(os.getenv("MAX_VRAM_GB", "15.0"))
     )
-    screenshot_compression: str = "PNG"  # or "JPEG" for lower disk usage
-    enable_action_cache: bool = True  # Reuse coords for repeated clicks
-
     # Logging Settings
     log_dir: str = Field(
         default_factory=lambda: os.getenv("LOG_DIR", "./logs")
@@ -99,10 +95,6 @@ class AgentConfig(BaseModel):
     log_level: str = Field(
         default_factory=lambda: os.getenv("LOG_LEVEL", "INFO")
     )
-    save_screenshots: bool = Field(
-        default_factory=lambda: os.getenv("SAVE_SCREENSHOTS", "false").lower() == "true"
-    )
-
     # Sensitive action detection patterns
     sensitive_action_patterns: list[str] = [
         r"buy|purchase|pay|checkout|confirm.*order",
@@ -123,13 +115,6 @@ class AgentConfig(BaseModel):
     def is_claude(self) -> bool:
         """Check if using Claude as the LLM provider"""
         return self.llm_provider.lower() == "claude"
-
-    @property
-    def screenshots_dir(self) -> Path:
-        """Directory for storing screenshots"""
-        path = Path(self.log_dir) / "screenshots"
-        path.mkdir(parents=True, exist_ok=True)
-        return path
 
     @property
     def tasks_dir(self) -> Path:

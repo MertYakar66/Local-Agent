@@ -227,7 +227,7 @@ def render_thought_process(
 
         stage_emoji = {
             "planner": "📋",
-            "vision_actor": "👁️",
+            "dom_actor": "🎯",
             "execution": "🎯",
             "verification": "✓",
         }.get(stage, "💭")

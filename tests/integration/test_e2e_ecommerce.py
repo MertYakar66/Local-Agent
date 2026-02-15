@@ -6,7 +6,7 @@ from pathlib import Path
 import tempfile
 
 from src.browser.tab_manager import TabManager
-from src.browser.action_executor import ActionExecutor
+from src.agents.dom_actor import DOMActorAgent, DOMAction
 
 
 @pytest.fixture
@@ -57,40 +57,8 @@ class TestEcommerceScenarios:
             await tab_manager.close()
 
     @pytest.mark.asyncio
-    async def test_screenshot_capture_all_tabs(self):
-        """Test capturing screenshots from all tabs"""
-        from PIL import Image
-        import io
-
-        tab_manager = TabManager(headless=True)
-        await tab_manager.initialize()
-
-        try:
-            # Open multiple tabs
-            for i in range(3):
-                await tab_manager.create_tab(i)
-                await tab_manager.navigate(i, f"https://example.{'com' if i == 0 else 'org' if i == 1 else 'net'}")
-
-            # Capture screenshots from each
-            screenshots = []
-            for i in range(3):
-                screenshot = await tab_manager.get_tab_screenshot(i)
-                screenshots.append(screenshot)
-
-            # Verify all screenshots
-            for i, screenshot in enumerate(screenshots):
-                assert len(screenshot) > 0
-                image = Image.open(io.BytesIO(screenshot))
-                assert image.width == 1280
-                assert image.height == 720
-                print(f"✓ Tab {i} screenshot: {len(screenshot)} bytes")
-
-        finally:
-            await tab_manager.close()
-
-    @pytest.mark.asyncio
-    async def test_action_executor_coordinates(self):
-        """Test action executor coordinate translation"""
+    async def test_dom_snapshot(self):
+        """Test DOM snapshot extraction from a page"""
         tab_manager = TabManager(headless=True)
         await tab_manager.initialize()
 
@@ -99,26 +67,21 @@ class TestEcommerceScenarios:
             await tab_manager.navigate(0, "https://example.com")
 
             page = tab_manager.get_page(0)
-            executor = ActionExecutor(page, 1280, 720)
+            dom_actor = DOMActorAgent()
 
-            # Test coordinate translation
-            bbox = [500, 500, 600, 600]  # Normalized 0-1000
-            pixel_bbox = executor._bbox_to_pixels(bbox)
+            # Get DOM snapshot
+            dom = await dom_actor.get_dom_snapshot(page)
 
-            # 500/1000 * 1280 = 640, 500/1000 * 720 = 360
-            expected_x1 = int((500 / 1000) * 1280)
-            expected_y1 = int((500 / 1000) * 720)
-
-            assert pixel_bbox[0] == expected_x1
-            assert pixel_bbox[1] == expected_y1
-            print(f"✓ Coordinate translation: {bbox} -> {pixel_bbox}")
+            assert len(dom) > 0
+            assert "title" in dom.lower() or "elements" in dom.lower()
+            print(f"✓ DOM snapshot extracted: {len(dom)} chars")
 
         finally:
             await tab_manager.close()
 
     @pytest.mark.asyncio
-    async def test_scroll_action(self):
-        """Test scroll action execution"""
+    async def test_dom_action_execution(self):
+        """Test executing DOM-based actions directly via Playwright"""
         tab_manager = TabManager(headless=True)
         await tab_manager.initialize()
 
@@ -127,47 +90,28 @@ class TestEcommerceScenarios:
             await tab_manager.navigate(0, "https://example.com")
 
             page = tab_manager.get_page(0)
-            executor = ActionExecutor(page, 1280, 720)
+            dom_actor = DOMActorAgent()
 
-            # Get initial scroll position
-            initial_scroll = await page.evaluate("window.scrollY")
+            # Test scroll action
+            scroll_action = DOMAction(
+                action_type="scroll",
+                value="down",
+                reasoning="Scroll down to see more content",
+            )
+            result = await dom_actor.execute_action(page, scroll_action)
+            assert result["success"]
+            print("✓ Scroll action executed")
 
-            # Execute scroll action
-            result = await executor.execute({
-                "action_type": "scroll",
-                "value": "down",
-            })
-
-            assert result.success
-            print(f"✓ Scroll action executed")
-
-        finally:
-            await tab_manager.close()
-
-    @pytest.mark.asyncio
-    async def test_extract_action(self):
-        """Test data extraction action"""
-        tab_manager = TabManager(headless=True)
-        await tab_manager.initialize()
-
-        try:
-            await tab_manager.create_tab(0)
-            await tab_manager.navigate(0, "https://example.com")
-
-            page = tab_manager.get_page(0)
-            executor = ActionExecutor(page, 1280, 720)
-
-            # Execute extract action
-            result = await executor.execute({
-                "action_type": "extract",
-                "target_element": {
-                    "description": "page title",
-                },
-            })
-
-            assert result.success
-            assert result.extracted_data is not None
-            print(f"✓ Extract action: {result.extracted_data}")
+            # Test extract action
+            extract_action = DOMAction(
+                action_type="extract",
+                selector="h1",
+                reasoning="Extract page heading",
+            )
+            result = await dom_actor.execute_action(page, extract_action)
+            assert result["success"]
+            assert "extracted_data" in result
+            print(f"✓ Extract action: {result['extracted_data']}")
 
         finally:
             await tab_manager.close()
@@ -214,34 +158,6 @@ class TestParallelTabOperations:
         finally:
             await tab_manager.close()
 
-    @pytest.mark.asyncio
-    async def test_concurrent_screenshots(self):
-        """Test capturing screenshots from multiple tabs concurrently"""
-        tab_manager = TabManager(headless=True)
-        await tab_manager.initialize()
-
-        try:
-            # Set up tabs
-            for i in range(5):
-                await tab_manager.create_tab(i)
-                await tab_manager.navigate(i, "https://example.com")
-
-            # Capture screenshots concurrently
-            tasks = [
-                tab_manager.get_tab_screenshot(i)
-                for i in range(5)
-            ]
-
-            screenshots = await asyncio.gather(*tasks)
-
-            assert len(screenshots) == 5
-            for i, screenshot in enumerate(screenshots):
-                assert len(screenshot) > 0
-                print(f"✓ Tab {i} screenshot: {len(screenshot)} bytes")
-
-        finally:
-            await tab_manager.close()
-
 
 class TestTabStability:
     """Test tab stability under load"""
@@ -264,8 +180,6 @@ class TestTabStability:
             for i in range(10):
                 state = await tab_manager.get_tab_state(i)
                 assert state.status.value == "ready"
-                screenshot = await tab_manager.get_tab_screenshot(i)
-                assert len(screenshot) > 0
 
             print(f"✓ All 10 tabs stable and functional")
 

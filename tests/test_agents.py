@@ -6,7 +6,7 @@ import pytest
 from unittest.mock import AsyncMock, patch, MagicMock
 
 from src.agents.planner import PlannerAgent, TaskPlan, TaskStep
-from src.agents.vision_actor import VisionActorAgent, ActionOutput, TargetElement
+from src.agents.dom_actor import DOMActorAgent, DOMAction
 from src.agents.verifier import VerifierAgent, VerificationResult
 
 
@@ -153,49 +153,69 @@ class TestTaskPlan:
         assert plan.current_step_index == 1
 
 
-class TestActionOutput:
-    """Test ActionOutput dataclass"""
+class TestDOMAction:
+    """Test DOMAction dataclass"""
 
     def test_create_action(self):
-        """Test creating an ActionOutput"""
-        target = TargetElement(
-            description="Blue search button",
-            bbox=(425, 380, 575, 420),
+        """Test creating a DOMAction"""
+        action = DOMAction(
+            action_type="click",
+            selector="#search-btn",
+            reasoning="Found the search button",
             confidence=0.98,
         )
 
-        action = ActionOutput(
-            action_type="click",
-            target_element=target,
-            reasoning="Found the search button",
-        )
-
         assert action.action_type == "click"
+        assert action.selector == "#search-btn"
         assert action.confidence == 0.98
 
     def test_action_validity(self):
         """Test action validation"""
         # Valid click action
-        target = TargetElement(
-            description="Button",
-            bbox=(100, 100, 200, 200),
-            confidence=0.95,
-        )
-        action = ActionOutput(action_type="click", target_element=target)
+        action = DOMAction(action_type="click", selector="#btn")
         assert action.is_valid
 
-        # Invalid - low confidence
-        target_low = TargetElement(
-            description="Button",
-            bbox=(100, 100, 200, 200),
-            confidence=0.5,
-        )
-        action_low = ActionOutput(action_type="click", target_element=target_low)
-        assert not action_low.is_valid
+        # Invalid click - no selector
+        action_no_sel = DOMAction(action_type="click")
+        assert not action_no_sel.is_valid
 
-        # Valid extract (no bbox needed)
-        action_extract = ActionOutput(action_type="extract")
-        assert action_extract.is_valid
+        # Valid press_key (no selector needed)
+        action_key = DOMAction(action_type="press_key", value="Enter")
+        assert action_key.is_valid
+
+        # Valid scroll (no selector needed)
+        action_scroll = DOMAction(action_type="scroll", value="down")
+        assert action_scroll.is_valid
+
+        # Invalid - no action type
+        action_empty = DOMAction(action_type="")
+        assert not action_empty.is_valid
+
+    def test_action_from_dict(self):
+        """Test creating DOMAction from dictionary"""
+        data = {
+            "action_type": "fill",
+            "selector": "input[name=q]",
+            "value": "test query",
+            "reasoning": "Fill search input",
+        }
+
+        action = DOMAction.from_dict(data)
+        assert action.action_type == "fill"
+        assert action.selector == "input[name=q]"
+        assert action.value == "test query"
+
+    def test_action_to_dict(self):
+        """Test converting DOMAction to dictionary"""
+        action = DOMAction(
+            action_type="click",
+            selector="text=Submit",
+            reasoning="Click submit button",
+        )
+
+        d = action.to_dict()
+        assert d["action_type"] == "click"
+        assert d["selector"] == "text=Submit"
 
 
 class TestVerificationResult:
@@ -246,10 +266,11 @@ class TestPlannerAgent:
                 },
                 {
                     "step": 2,
-                    "action": "search",
+                    "action": "fill",
                     "description": "Search for product",
-                    "target": "iPhone 15",
+                    "target": "search input",
                     "tab": 0,
+                    "value": "iPhone 15",
                     "verification_criteria": "Results appear",
                 },
             ]
@@ -259,36 +280,7 @@ class TestPlannerAgent:
 
             assert len(plan.steps) == 2
             assert plan.steps[0].action == "navigate"
-            assert plan.steps[1].action == "search"
-
-
-class TestVisionActorAgent:
-    """Test VisionActorAgent with mocked LLM"""
-
-    @pytest.mark.asyncio
-    async def test_get_action(self):
-        """Test getting action from screenshot"""
-        with patch.object(VisionActorAgent, 'generate_json') as mock_gen:
-            mock_gen.return_value = {
-                "action_type": "click",
-                "target_element": {
-                    "description": "Search button",
-                    "bbox": [450, 300, 550, 350],
-                    "confidence": 0.95,
-                },
-                "value": None,
-                "reasoning": "Found prominent search button",
-            }
-
-            actor = VisionActorAgent()
-            action = await actor.get_action(
-                screenshot_bytes=b"fake_screenshot",
-                step_description="Click the search button",
-                current_url="https://example.com",
-            )
-
-            assert action.action_type == "click"
-            assert action.target_element.confidence == 0.95
+            assert plan.steps[1].action == "fill"
 
 
 class TestVerifierAgent:

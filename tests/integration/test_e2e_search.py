@@ -9,7 +9,7 @@ import tempfile
 from src.main import AgentOrchestrator
 from src.browser.tab_manager import TabManager
 from src.agents.planner import PlannerAgent, TaskPlan, TaskStep
-from src.agents.vision_actor import VisionActorAgent, ActionOutput, TargetElement
+from src.agents.dom_actor import DOMActorAgent, DOMAction
 from src.agents.verifier import VerifierAgent, VerificationResult
 
 
@@ -46,35 +46,6 @@ class TestSearchEndToEnd:
             assert "google" in state.current_url.lower()
             print(f"✓ Navigated to: {state.current_url}")
             print(f"✓ Page title: {state.title}")
-
-        finally:
-            await tab_manager.close()
-
-    @pytest.mark.asyncio
-    async def test_capture_google_screenshot(self):
-        """Test capturing a screenshot of Google"""
-        from PIL import Image
-        import io
-
-        tab_manager = TabManager(headless=True)
-        await tab_manager.initialize()
-
-        try:
-            await tab_manager.create_tab(0)
-            await tab_manager.navigate(0, "https://www.google.com")
-
-            screenshot = await tab_manager.get_tab_screenshot(0)
-
-            # Verify it's a valid PNG
-            assert screenshot[:8] == b'\x89PNG\r\n\x1a\n'
-
-            # Check dimensions
-            image = Image.open(io.BytesIO(screenshot))
-            assert image.width == 1280
-            assert image.height == 720
-
-            print(f"✓ Screenshot captured: {len(screenshot)} bytes")
-            print(f"✓ Dimensions: {image.width}x{image.height}")
 
         finally:
             await tab_manager.close()
@@ -148,11 +119,10 @@ class TestOrchestratorMocked:
     @pytest.mark.asyncio
     async def test_orchestrator_planning_phase(self, temp_dir):
         """Test the planning phase of orchestrator"""
-        # Mock the planner
         with patch.object(PlannerAgent, 'decompose_task') as mock_plan, \
              patch.object(PlannerAgent, 'preload_model', return_value=True), \
              patch.object(PlannerAgent, 'close', return_value=None), \
-             patch.object(VisionActorAgent, 'close', return_value=None), \
+             patch.object(DOMActorAgent, 'close', return_value=None), \
              patch.object(VerifierAgent, 'close', return_value=None):
 
             mock_plan.return_value = TaskPlan(
@@ -173,7 +143,7 @@ class TestOrchestratorMocked:
 
             # Manually set up orchestrator state
             orchestrator.planner = PlannerAgent()
-            orchestrator.vision_actor = VisionActorAgent()
+            orchestrator.dom_actor = DOMActorAgent()
             orchestrator.verifier = VerifierAgent()
 
             # Call planning

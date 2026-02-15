@@ -11,7 +11,6 @@ import asyncio
 from dataclasses import dataclass, field
 from datetime import datetime
 from enum import Enum
-from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from playwright.async_api import (
@@ -51,7 +50,6 @@ class TabState:
     status: TabStatus = TabStatus.LOADING
     last_action: Optional[str] = None
     last_action_time: Optional[datetime] = None
-    screenshot_path: Optional[Path] = None
     error_message: Optional[str] = None
     extracted_data: Dict[str, Any] = field(default_factory=dict)
 
@@ -64,7 +62,6 @@ class TabState:
             "status": self.status.value,
             "last_action": self.last_action,
             "last_action_time": self.last_action_time.isoformat() if self.last_action_time else None,
-            "screenshot_path": str(self.screenshot_path) if self.screenshot_path else None,
             "error_message": self.error_message,
         }
 
@@ -390,102 +387,6 @@ class TabManager:
             raise
 
         return tab_state
-
-    async def get_tab_screenshot(
-        self,
-        tab_id: int,
-        full_page: bool = False
-    ) -> bytes:
-        """
-        Capture screenshot at configured resolution.
-
-        Args:
-            tab_id: Tab to capture
-            full_page: Whether to capture full scrollable page
-
-        Returns:
-            Screenshot as PNG bytes
-        """
-        if tab_id not in self.tabs:
-            raise ValueError(f"Tab {tab_id} not found")
-
-        tab_state = self.tabs[tab_id]
-
-        # Capture screenshot
-        screenshot_bytes = await tab_state.page.screenshot(
-            type="png",
-            full_page=full_page,
-        )
-
-        logger.debug(f"Tab {tab_id}: Screenshot captured ({len(screenshot_bytes)} bytes)")
-        return screenshot_bytes
-
-    async def save_tab_screenshot(
-        self,
-        tab_id: int,
-        save_path: Path,
-        full_page: bool = False
-    ) -> Path:
-        """
-        Capture and save screenshot to file.
-
-        Args:
-            tab_id: Tab to capture
-            save_path: Path to save screenshot
-            full_page: Whether to capture full page
-
-        Returns:
-            Path to saved screenshot
-        """
-        screenshot_bytes = await self.get_tab_screenshot(tab_id, full_page)
-
-        save_path.parent.mkdir(parents=True, exist_ok=True)
-        save_path.write_bytes(screenshot_bytes)
-
-        self.tabs[tab_id].screenshot_path = save_path
-
-        logger.debug(f"Tab {tab_id}: Screenshot saved to {save_path}")
-        return save_path
-
-    async def execute_action_on_tab(
-        self,
-        tab_id: int,
-        action: Dict[str, Any]
-    ) -> Dict[str, Any]:
-        """
-        Route action to correct tab based on plan.
-
-        Args:
-            tab_id: Tab to execute action on
-            action: Action dict from Vision-Actor
-
-        Returns:
-            Execution result dict
-        """
-        if tab_id not in self.tabs:
-            raise ValueError(f"Tab {tab_id} not found")
-
-        # Ensure we're on the correct tab
-        await self.switch_to_tab(tab_id)
-
-        # Import here to avoid circular imports
-        from src.browser.action_executor import ActionExecutor
-
-        executor = ActionExecutor(
-            self.tabs[tab_id].page,
-            self.viewport_width,
-            self.viewport_height,
-        )
-
-        result = await executor.execute(action)
-
-        # Update tab state
-        tab_state = self.tabs[tab_id]
-        tab_state.last_action = action.get("action_type", "unknown")
-        tab_state.last_action_time = datetime.now()
-        tab_state.current_url = tab_state.page.url
-
-        return result
 
     async def get_tab_state(self, tab_id: int) -> TabState:
         """Get current state of a tab"""
