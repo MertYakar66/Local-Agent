@@ -31,6 +31,7 @@ dev = [
 [project.scripts]
 browser-agent = "src.main:main"
 browser-agent-ui = "src.ui.streamlit_app:run"
+browser-agent-mcp = "src.mcp_server:main"
 
 [build-system]
 requires = ["hatchling"]
