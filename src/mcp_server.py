@@ -3,16 +3,20 @@
 IMPORTANT: This server makes NO LLM calls. Claude Desktop does all reasoning.
 This is pure browser execution only, resulting in $0 API token costs.
 
+Uses the official MCP Python SDK for proper protocol version negotiation.
+
 Tools provided:
 - Navigation: browse_to, go_back, go_forward
 - Waiting: wait_for (selector/timeout/network) - CRITICAL for dynamic content
 - Interaction: click, fill, press_key, scroll, select_option
 - Extraction: get_page_info, get_dom_elements, extract_text, extract_table
 - Debugging: take_screenshot
-- Multi-tab: new_tab, switch_tab, close_tab
+- Audit: get_action_log
+- Multi-tab: new_tab, switch_tab, close_tab, list_tabs
 
 Usage:
-  1. Add to Claude Desktop's claude_desktop_config.json:
+  1. Install: pip install "mcp>=1.0.0"
+  2. Add to Claude Desktop's claude_desktop_config.json:
      {
        "mcpServers": {
          "browser-agent": {
@@ -22,24 +26,26 @@ Usage:
          }
        }
      }
-  2. Restart Claude Desktop
-  3. Ask Claude to browse websites, fill forms, extract data
+  3. Restart Claude Desktop
+  4. Ask Claude to browse websites, fill forms, extract data
 """
 
-import asyncio
 import base64
 import json
 import os
-import re
 import sys
 from datetime import datetime
-from typing import Any, Dict, List, Optional, Set
+from typing import Annotated, Any, Dict, List, Literal, Optional, Set
 
+from pydantic import Field
+
+# Official MCP SDK - handles protocol negotiation automatically
+from mcp.server.fastmcp import FastMCP
 from playwright.async_api import Page, async_playwright, Playwright, Browser, BrowserContext
+
 
 # ============ Security: Domain Allowlist ============
 
-# Default allowed domains (can be overridden via MCP_ALLOWED_DOMAINS env var)
 DEFAULT_ALLOWED_DOMAINS: Set[str] = {
     # Search engines
     "google.com", "www.google.com",
@@ -51,12 +57,14 @@ DEFAULT_ALLOWED_DOMAINS: Set[str] = {
     "example.com", "example.org", "example.net",
 }
 
+
 def get_allowed_domains() -> Set[str]:
     """Get allowed domains from env or use defaults."""
     env_domains = os.getenv("MCP_ALLOWED_DOMAINS", "")
     if env_domains:
         return set(d.strip().lower() for d in env_domains.split(",") if d.strip())
     return DEFAULT_ALLOWED_DOMAINS
+
 
 def is_domain_allowed(url: str) -> tuple[bool, str]:
     """Check if URL domain is in allowlist. Returns (allowed, reason)."""
@@ -79,12 +87,12 @@ def is_domain_allowed(url: str) -> tuple[bool, str]:
         return False, f"Invalid URL: {e}"
 
 
-# ============ MCP Server ============
+# ============ Browser Server (Pure Execution, NO LLM calls) ============
 
 class MCPBrowserServer:
     """
-    Pure execution MCP server. NO LLM calls are made here.
-    Claude Desktop performs all reasoning; this server just executes browser commands.
+    Pure execution browser server. NO LLM calls are made here.
+    Claude Desktop performs all reasoning; this just executes browser commands.
     """
 
     def __init__(self):
@@ -137,7 +145,7 @@ class MCPBrowserServer:
     def _get_page(self) -> Page:
         """Get active page."""
         if not self._initialized:
-            raise RuntimeError("Browser not initialized")
+            raise RuntimeError("Browser not initialized. Call a navigation tool first.")
         return self._tabs[self._active_tab]
 
     def _log_action(self, tool: str, args: Dict, result: Dict) -> None:
@@ -152,20 +160,15 @@ class MCPBrowserServer:
         if len(self._action_log) > 100:
             self._action_log = self._action_log[-100:]
 
-    # ============ Navigation Tools ============
+    # ---- Navigation ----
 
     async def browse_to(self, url: str) -> Dict[str, Any]:
-        """Navigate to a URL (with domain allowlist check)."""
         await self.initialize()
-
-        # Security: check domain allowlist
         allowed, reason = is_domain_allowed(url)
         if not allowed:
             return {"success": False, "error": reason}
 
         page = self._get_page()
-
-        # Add https:// if missing
         if not url.startswith(("http://", "https://")):
             url = f"https://{url}"
 
@@ -183,7 +186,6 @@ class MCPBrowserServer:
         return result
 
     async def go_back(self) -> Dict[str, Any]:
-        """Go back in browser history."""
         await self.initialize()
         page = self._get_page()
         try:
@@ -193,7 +195,6 @@ class MCPBrowserServer:
             return {"success": False, "error": str(e)}
 
     async def go_forward(self) -> Dict[str, Any]:
-        """Go forward in browser history."""
         await self.initialize()
         page = self._get_page()
         try:
@@ -202,7 +203,7 @@ class MCPBrowserServer:
         except Exception as e:
             return {"success": False, "error": str(e)}
 
-    # ============ Waiting Tools (CRITICAL for dynamic content) ============
+    # ---- Waiting ----
 
     async def wait_for(
         self,
@@ -211,45 +212,29 @@ class MCPBrowserServer:
         timeout: int = 10000,
         wait_for_network: bool = False,
     ) -> Dict[str, Any]:
-        """
-        Wait for conditions before proceeding.
-
-        Args:
-            selector: CSS/Playwright selector to wait for
-            state: "visible", "hidden", "attached", "detached"
-            timeout: Max wait time in ms
-            wait_for_network: If True, wait for network idle
-        """
         await self.initialize()
         page = self._get_page()
-
         try:
             if wait_for_network:
                 await page.wait_for_load_state("networkidle", timeout=timeout)
-
             if selector:
                 await page.wait_for_selector(selector, state=state, timeout=timeout)
-
             return {"success": True, "waited_for": selector or "network"}
         except Exception as e:
             return {"success": False, "error": str(e), "hint": "Element may not exist or page still loading"}
 
-    # ============ Interaction Tools ============
+    # ---- Interaction ----
 
     async def click(self, selector: str, timeout: int = 10000) -> Dict[str, Any]:
-        """Click an element by Playwright selector."""
         await self.initialize()
         page = self._get_page()
         url_before = page.url
-
         try:
             await page.click(selector, timeout=timeout)
-            # Wait briefly for any navigation
             try:
                 await page.wait_for_load_state("domcontentloaded", timeout=3000)
             except:
                 pass
-
             result = {
                 "success": True,
                 "url": page.url,
@@ -261,41 +246,33 @@ class MCPBrowserServer:
                 "error": str(e),
                 "hint": "Use get_dom_elements to find correct selector, or wait_for first",
             }
-
         self._log_action("click", {"selector": selector}, result)
         return result
 
     async def fill(self, selector: str, value: str, clear_first: bool = True) -> Dict[str, Any]:
-        """Fill an input field."""
         await self.initialize()
         page = self._get_page()
-
         try:
             if clear_first:
                 await page.fill(selector, value, timeout=10000)
             else:
                 await page.type(selector, value, timeout=10000)
-
             result = {"success": True, "filled": value}
         except Exception as e:
             result = {"success": False, "error": str(e)}
-
         self._log_action("fill", {"selector": selector, "value": value[:50]}, result)
         return result
 
     async def press_key(self, key: str = "Enter") -> Dict[str, Any]:
-        """Press a keyboard key."""
         await self.initialize()
         page = self._get_page()
         url_before = page.url
-
         try:
             await page.keyboard.press(key)
             try:
                 await page.wait_for_load_state("domcontentloaded", timeout=5000)
             except:
                 pass
-
             return {
                 "success": True,
                 "key": key,
@@ -306,31 +283,25 @@ class MCPBrowserServer:
             return {"success": False, "error": str(e)}
 
     async def scroll(self, direction: str = "down", amount: int = 500) -> Dict[str, Any]:
-        """Scroll the page."""
         await self.initialize()
         page = self._get_page()
-
         delta = amount if direction == "down" else -amount
         await page.evaluate(f"window.scrollBy(0, {delta})")
-
         scroll_pos = await page.evaluate("window.scrollY")
         return {"success": True, "direction": direction, "scroll_position": scroll_pos}
 
     async def select_option(self, selector: str, value: str) -> Dict[str, Any]:
-        """Select an option from a dropdown."""
         await self.initialize()
         page = self._get_page()
-
         try:
             await page.select_option(selector, value, timeout=10000)
             return {"success": True, "selected": value}
         except Exception as e:
             return {"success": False, "error": str(e)}
 
-    # ============ Extraction Tools ============
+    # ---- Extraction ----
 
     async def get_page_info(self) -> Dict[str, Any]:
-        """Get current page URL and title."""
         await self.initialize()
         page = self._get_page()
         return {
@@ -340,25 +311,16 @@ class MCPBrowserServer:
         }
 
     async def get_dom_elements(self, max_elements: int = 50) -> Dict[str, Any]:
-        """
-        Get interactive elements on the current page.
-        Returns bounded DOM snapshot to prevent token explosion.
-        """
         await self.initialize()
         page = self._get_page()
-
-        # JavaScript to extract interactive elements
         dom_data = await page.evaluate("""(maxElements) => {
             const elements = [];
             const selectors = 'a, button, input, select, textarea, [role="button"], [onclick], [tabindex]';
-
             document.querySelectorAll(selectors).forEach((el, idx) => {
                 if (idx >= maxElements) return;
-                if (el.offsetParent === null && el.tagName !== 'INPUT') return; // Skip hidden
-
+                if (el.offsetParent === null && el.tagName !== 'INPUT') return;
                 const rect = el.getBoundingClientRect();
                 if (rect.width === 0 || rect.height === 0) return;
-
                 let selector = '';
                 if (el.id) {
                     selector = '#' + el.id;
@@ -369,7 +331,6 @@ class MCPBrowserServer:
                 } else {
                     selector = el.tagName.toLowerCase();
                 }
-
                 elements.push({
                     tag: el.tagName.toLowerCase(),
                     type: el.type || null,
@@ -380,7 +341,6 @@ class MCPBrowserServer:
                     aria_label: el.getAttribute('aria-label'),
                 });
             });
-
             return {
                 title: document.title,
                 url: window.location.href,
@@ -388,14 +348,11 @@ class MCPBrowserServer:
                 elements: elements.slice(0, maxElements),
             };
         }""", max_elements)
-
         return dom_data
 
     async def extract_text(self, selector: str, max_items: int = 20) -> Dict[str, Any]:
-        """Extract text content from elements matching a selector."""
         await self.initialize()
         page = self._get_page()
-
         try:
             elements = await page.query_selector_all(selector)
             texts = []
@@ -403,29 +360,17 @@ class MCPBrowserServer:
                 text = await el.text_content()
                 if text and text.strip():
                     texts.append(text.strip())
-
-            return {
-                "success": True,
-                "selector": selector,
-                "count": len(texts),
-                "texts": texts,
-            }
+            return {"success": True, "selector": selector, "count": len(texts), "texts": texts}
         except Exception as e:
             return {"success": False, "error": str(e)}
 
     async def extract_table(self, selector: str = "table") -> Dict[str, Any]:
-        """
-        Extract table data as structured JSON.
-        Returns rows with column headers as keys.
-        """
         await self.initialize()
         page = self._get_page()
-
         try:
             table_data = await page.evaluate("""(selector) => {
                 const table = document.querySelector(selector);
                 if (!table) return { error: 'Table not found' };
-
                 const headers = [];
                 const headerRow = table.querySelector('thead tr, tr:first-child');
                 if (headerRow) {
@@ -433,14 +378,12 @@ class MCPBrowserServer:
                         headers.push(cell.textContent.trim());
                     });
                 }
-
                 const rows = [];
                 const dataRows = table.querySelectorAll('tbody tr, tr:not(:first-child)');
                 dataRows.forEach((row, idx) => {
-                    if (idx >= 50) return; // Limit rows
+                    if (idx >= 50) return;
                     const cells = row.querySelectorAll('td');
                     if (cells.length === 0) return;
-
                     const rowData = {};
                     cells.forEach((cell, i) => {
                         const key = headers[i] || `column_${i}`;
@@ -448,35 +391,22 @@ class MCPBrowserServer:
                     });
                     rows.push(rowData);
                 });
-
-                return {
-                    headers: headers,
-                    row_count: rows.length,
-                    rows: rows,
-                };
+                return { headers: headers, row_count: rows.length, rows: rows };
             }""", selector)
-
             if "error" in table_data:
                 return {"success": False, "error": table_data["error"]}
-
             return {"success": True, **table_data}
         except Exception as e:
             return {"success": False, "error": str(e)}
 
-    # ============ Debugging Tools ============
+    # ---- Debugging ----
 
     async def take_screenshot(self, full_page: bool = False) -> Dict[str, Any]:
-        """
-        Take a screenshot of the current page.
-        Returns base64-encoded PNG that Claude can analyze.
-        """
         await self.initialize()
         page = self._get_page()
-
         try:
             screenshot_bytes = await page.screenshot(type="png", full_page=full_page)
             screenshot_b64 = base64.b64encode(screenshot_bytes).decode("utf-8")
-
             return {
                 "success": True,
                 "format": "png",
@@ -487,19 +417,15 @@ class MCPBrowserServer:
             return {"success": False, "error": str(e)}
 
     async def get_action_log(self) -> Dict[str, Any]:
-        """Get recent action log for debugging."""
         return {
             "actions": self._action_log[-20:],
             "total_actions": len(self._action_log),
         }
 
-    # ============ Multi-tab Tools ============
+    # ---- Multi-tab ----
 
     async def new_tab(self, url: Optional[str] = None) -> Dict[str, Any]:
-        """Open a new browser tab."""
         await self.initialize()
-
-        # Security check if URL provided
         if url:
             allowed, reason = is_domain_allowed(url)
             if not allowed:
@@ -515,48 +441,29 @@ class MCPBrowserServer:
                 url = f"https://{url}"
             await page.goto(url, wait_until="domcontentloaded", timeout=30000)
 
-        return {
-            "success": True,
-            "tab_id": tab_id,
-            "url": page.url if url else "about:blank",
-        }
+        return {"success": True, "tab_id": tab_id, "url": page.url if url else "about:blank"}
 
     async def switch_tab(self, tab_id: int) -> Dict[str, Any]:
-        """Switch to a different tab."""
         if tab_id not in self._tabs:
             return {"success": False, "error": f"Tab {tab_id} not found"}
-
         self._active_tab = tab_id
         page = self._tabs[tab_id]
         await page.bring_to_front()
-
-        return {
-            "success": True,
-            "tab_id": tab_id,
-            "url": page.url,
-        }
+        return {"success": True, "tab_id": tab_id, "url": page.url}
 
     async def close_tab(self, tab_id: Optional[int] = None) -> Dict[str, Any]:
-        """Close a tab (default: current tab)."""
         tab_to_close = tab_id if tab_id is not None else self._active_tab
-
         if tab_to_close not in self._tabs:
             return {"success": False, "error": f"Tab {tab_to_close} not found"}
-
         if len(self._tabs) <= 1:
             return {"success": False, "error": "Cannot close last tab"}
-
         await self._tabs[tab_to_close].close()
         del self._tabs[tab_to_close]
-
-        # Switch to another tab if we closed the active one
         if self._active_tab == tab_to_close:
             self._active_tab = list(self._tabs.keys())[0]
-
         return {"success": True, "closed_tab": tab_to_close, "active_tab": self._active_tab}
 
     async def list_tabs(self) -> Dict[str, Any]:
-        """List all open tabs."""
         tabs_info = []
         for tab_id, page in self._tabs.items():
             tabs_info.append({
@@ -568,336 +475,212 @@ class MCPBrowserServer:
         return {"tabs": tabs_info, "active_tab": self._active_tab}
 
 
-# ============ MCP Protocol Handler ============
+# ============ FastMCP Server (Official SDK) ============
 
-def get_tool_definitions() -> List[Dict[str, Any]]:
-    """Return MCP tool definitions."""
-    return [
-        # Navigation
-        {
-            "name": "browse_to",
-            "description": "Navigate to a URL. Domain must be in allowlist (see MCP_ALLOWED_DOMAINS).",
-            "inputSchema": {
-                "type": "object",
-                "properties": {
-                    "url": {"type": "string", "description": "URL to navigate to"},
-                },
-                "required": ["url"],
-            },
-        },
-        {
-            "name": "go_back",
-            "description": "Go back in browser history.",
-            "inputSchema": {"type": "object", "properties": {}},
-        },
-        {
-            "name": "go_forward",
-            "description": "Go forward in browser history.",
-            "inputSchema": {"type": "object", "properties": {}},
-        },
+# Load .env for domain allowlist config
+try:
+    from dotenv import load_dotenv
+    load_dotenv()
+except ImportError:
+    pass
 
-        # Waiting (CRITICAL)
-        {
-            "name": "wait_for",
-            "description": "IMPORTANT: Wait for element or network before interacting. Use this before click/fill on dynamic pages.",
-            "inputSchema": {
-                "type": "object",
-                "properties": {
-                    "selector": {"type": "string", "description": "Selector to wait for (optional)"},
-                    "state": {"type": "string", "enum": ["visible", "hidden", "attached", "detached"], "default": "visible"},
-                    "timeout": {"type": "integer", "default": 10000, "description": "Timeout in milliseconds"},
-                    "wait_for_network": {"type": "boolean", "default": False, "description": "Wait for network idle"},
-                },
-            },
-        },
+mcp = FastMCP(
+    "browser-agent",
+    version="2.1.0",
+)
 
-        # Interaction
-        {
-            "name": "click",
-            "description": "Click an element. Use Playwright selectors: 'text=Submit', '#id', '.class', 'button[name=x]'",
-            "inputSchema": {
-                "type": "object",
-                "properties": {
-                    "selector": {"type": "string", "description": "Playwright selector"},
-                    "timeout": {"type": "integer", "default": 10000},
-                },
-                "required": ["selector"],
-            },
-        },
-        {
-            "name": "fill",
-            "description": "Fill text into an input field.",
-            "inputSchema": {
-                "type": "object",
-                "properties": {
-                    "selector": {"type": "string", "description": "Input field selector"},
-                    "value": {"type": "string", "description": "Text to enter"},
-                    "clear_first": {"type": "boolean", "default": True},
-                },
-                "required": ["selector", "value"],
-            },
-        },
-        {
-            "name": "press_key",
-            "description": "Press a keyboard key: Enter, Tab, Escape, ArrowDown, etc.",
-            "inputSchema": {
-                "type": "object",
-                "properties": {
-                    "key": {"type": "string", "default": "Enter"},
-                },
-            },
-        },
-        {
-            "name": "scroll",
-            "description": "Scroll the page up or down.",
-            "inputSchema": {
-                "type": "object",
-                "properties": {
-                    "direction": {"type": "string", "enum": ["up", "down"], "default": "down"},
-                    "amount": {"type": "integer", "default": 500, "description": "Pixels to scroll"},
-                },
-            },
-        },
-        {
-            "name": "select_option",
-            "description": "Select an option from a dropdown.",
-            "inputSchema": {
-                "type": "object",
-                "properties": {
-                    "selector": {"type": "string"},
-                    "value": {"type": "string", "description": "Option value to select"},
-                },
-                "required": ["selector", "value"],
-            },
-        },
-
-        # Extraction
-        {
-            "name": "get_page_info",
-            "description": "Get current page URL and title.",
-            "inputSchema": {"type": "object", "properties": {}},
-        },
-        {
-            "name": "get_dom_elements",
-            "description": "Get interactive elements on the page (links, buttons, inputs). Use to find selectors.",
-            "inputSchema": {
-                "type": "object",
-                "properties": {
-                    "max_elements": {"type": "integer", "default": 50},
-                },
-            },
-        },
-        {
-            "name": "extract_text",
-            "description": "Extract text content from elements matching a CSS selector.",
-            "inputSchema": {
-                "type": "object",
-                "properties": {
-                    "selector": {"type": "string", "description": "CSS selector"},
-                    "max_items": {"type": "integer", "default": 20},
-                },
-                "required": ["selector"],
-            },
-        },
-        {
-            "name": "extract_table",
-            "description": "Extract table data as structured JSON with headers as keys.",
-            "inputSchema": {
-                "type": "object",
-                "properties": {
-                    "selector": {"type": "string", "default": "table", "description": "Table selector"},
-                },
-            },
-        },
-
-        # Debugging
-        {
-            "name": "take_screenshot",
-            "description": "Take a screenshot (returns base64 PNG). Use when click fails to see what's on screen.",
-            "inputSchema": {
-                "type": "object",
-                "properties": {
-                    "full_page": {"type": "boolean", "default": False},
-                },
-            },
-        },
-        {
-            "name": "get_action_log",
-            "description": "Get recent action log for debugging.",
-            "inputSchema": {"type": "object", "properties": {}},
-        },
-
-        # Multi-tab
-        {
-            "name": "new_tab",
-            "description": "Open a new browser tab, optionally with a URL.",
-            "inputSchema": {
-                "type": "object",
-                "properties": {
-                    "url": {"type": "string", "description": "Optional URL to open"},
-                },
-            },
-        },
-        {
-            "name": "switch_tab",
-            "description": "Switch to a different tab by ID.",
-            "inputSchema": {
-                "type": "object",
-                "properties": {
-                    "tab_id": {"type": "integer"},
-                },
-                "required": ["tab_id"],
-            },
-        },
-        {
-            "name": "close_tab",
-            "description": "Close a tab (default: current tab).",
-            "inputSchema": {
-                "type": "object",
-                "properties": {
-                    "tab_id": {"type": "integer", "description": "Tab ID to close (optional)"},
-                },
-            },
-        },
-        {
-            "name": "list_tabs",
-            "description": "List all open tabs.",
-            "inputSchema": {"type": "object", "properties": {}},
-        },
-    ]
+# Module-level browser server (lazy initialization on first tool call)
+_server = MCPBrowserServer()
 
 
-async def handle_request(server: MCPBrowserServer, request: Dict[str, Any]) -> Optional[Dict[str, Any]]:
-    """Handle an MCP JSON-RPC request."""
-    method = request.get("method", "")
-    params = request.get("params", {})
-    req_id = request.get("id")
+# ---- Navigation Tools ----
 
-    try:
-        if method == "initialize":
-            return {
-                "jsonrpc": "2.0",
-                "id": req_id,
-                "result": {
-                    "protocolVersion": "2024-11-05",
-                    "capabilities": {"tools": {}},
-                    "serverInfo": {"name": "browser-agent", "version": "2.0.0"},
-                },
-            }
-
-        elif method == "tools/list":
-            return {
-                "jsonrpc": "2.0",
-                "id": req_id,
-                "result": {"tools": get_tool_definitions()},
-            }
-
-        elif method == "tools/call":
-            tool_name = params.get("name", "")
-            args = params.get("arguments", {})
-
-            # Dispatch to tool
-            tool_map = {
-                "browse_to": lambda: server.browse_to(args.get("url", "")),
-                "go_back": server.go_back,
-                "go_forward": server.go_forward,
-                "wait_for": lambda: server.wait_for(
-                    args.get("selector"),
-                    args.get("state", "visible"),
-                    args.get("timeout", 10000),
-                    args.get("wait_for_network", False),
-                ),
-                "click": lambda: server.click(args.get("selector", ""), args.get("timeout", 10000)),
-                "fill": lambda: server.fill(
-                    args.get("selector", ""),
-                    args.get("value", ""),
-                    args.get("clear_first", True),
-                ),
-                "press_key": lambda: server.press_key(args.get("key", "Enter")),
-                "scroll": lambda: server.scroll(args.get("direction", "down"), args.get("amount", 500)),
-                "select_option": lambda: server.select_option(args.get("selector", ""), args.get("value", "")),
-                "get_page_info": server.get_page_info,
-                "get_dom_elements": lambda: server.get_dom_elements(args.get("max_elements", 50)),
-                "extract_text": lambda: server.extract_text(args.get("selector", ""), args.get("max_items", 20)),
-                "extract_table": lambda: server.extract_table(args.get("selector", "table")),
-                "take_screenshot": lambda: server.take_screenshot(args.get("full_page", False)),
-                "get_action_log": server.get_action_log,
-                "new_tab": lambda: server.new_tab(args.get("url")),
-                "switch_tab": lambda: server.switch_tab(args.get("tab_id", 0)),
-                "close_tab": lambda: server.close_tab(args.get("tab_id")),
-                "list_tabs": server.list_tabs,
-            }
-
-            if tool_name not in tool_map:
-                return {
-                    "jsonrpc": "2.0",
-                    "id": req_id,
-                    "error": {"code": -32601, "message": f"Unknown tool: {tool_name}"},
-                }
-
-            result = await tool_map[tool_name]()
-
-            return {
-                "jsonrpc": "2.0",
-                "id": req_id,
-                "result": {
-                    "content": [{"type": "text", "text": json.dumps(result, indent=2)}],
-                },
-            }
-
-        elif method == "notifications/initialized":
-            return None  # No response needed
-
-        else:
-            return {
-                "jsonrpc": "2.0",
-                "id": req_id,
-                "error": {"code": -32601, "message": f"Method not found: {method}"},
-            }
-
-    except Exception as e:
-        return {
-            "jsonrpc": "2.0",
-            "id": req_id,
-            "error": {"code": -32000, "message": str(e)},
-        }
+@mcp.tool()
+async def browse_to(
+    url: Annotated[str, Field(description="URL to navigate to")],
+) -> str:
+    """Navigate to a URL. Domain must be in allowlist (see MCP_ALLOWED_DOMAINS env var)."""
+    result = await _server.browse_to(url)
+    return json.dumps(result, indent=2)
 
 
-async def run_mcp_server():
-    """Run the MCP server over stdio."""
-    server = MCPBrowserServer()
+@mcp.tool()
+async def go_back() -> str:
+    """Go back in browser history."""
+    result = await _server.go_back()
+    return json.dumps(result, indent=2)
 
-    while True:
-        try:
-            line = await asyncio.get_event_loop().run_in_executor(None, sys.stdin.readline)
-            if not line:
-                break
 
-            request = json.loads(line)
-            response = await handle_request(server, request)
+@mcp.tool()
+async def go_forward() -> str:
+    """Go forward in browser history."""
+    result = await _server.go_forward()
+    return json.dumps(result, indent=2)
 
-            if response:
-                sys.stdout.write(json.dumps(response) + "\n")
-                sys.stdout.flush()
 
-        except json.JSONDecodeError:
-            continue
-        except KeyboardInterrupt:
-            break
-        except Exception as e:
-            sys.stdout.write(json.dumps({
-                "jsonrpc": "2.0",
-                "id": None,
-                "error": {"code": -32000, "message": str(e)},
-            }) + "\n")
-            sys.stdout.flush()
+# ---- Waiting Tools (CRITICAL for dynamic content) ----
 
-    await server.shutdown()
+@mcp.tool()
+async def wait_for(
+    selector: Annotated[Optional[str], Field(description="CSS/Playwright selector to wait for")] = None,
+    state: Annotated[Literal["visible", "hidden", "attached", "detached"], Field(description="Element state to wait for")] = "visible",
+    timeout: Annotated[int, Field(description="Max wait time in milliseconds")] = 10000,
+    wait_for_network: Annotated[bool, Field(description="If true, wait for network idle")] = False,
+) -> str:
+    """IMPORTANT: Wait for element or network before interacting. Use before click/fill on dynamic pages."""
+    result = await _server.wait_for(selector, state, timeout, wait_for_network)
+    return json.dumps(result, indent=2)
 
+
+# ---- Interaction Tools ----
+
+@mcp.tool()
+async def click(
+    selector: Annotated[str, Field(description="Playwright selector: 'text=Submit', '#id', '.class', 'button[name=x]'")],
+    timeout: Annotated[int, Field(description="Timeout in milliseconds")] = 10000,
+) -> str:
+    """Click an element by Playwright selector."""
+    result = await _server.click(selector, timeout)
+    return json.dumps(result, indent=2)
+
+
+@mcp.tool()
+async def fill(
+    selector: Annotated[str, Field(description="Input field selector")],
+    value: Annotated[str, Field(description="Text to enter")],
+    clear_first: Annotated[bool, Field(description="Clear field before filling")] = True,
+) -> str:
+    """Fill text into an input field."""
+    result = await _server.fill(selector, value, clear_first)
+    return json.dumps(result, indent=2)
+
+
+@mcp.tool()
+async def press_key(
+    key: Annotated[str, Field(description="Key to press: Enter, Tab, Escape, ArrowDown, etc.")] = "Enter",
+) -> str:
+    """Press a keyboard key."""
+    result = await _server.press_key(key)
+    return json.dumps(result, indent=2)
+
+
+@mcp.tool()
+async def scroll(
+    direction: Annotated[Literal["up", "down"], Field(description="Scroll direction")] = "down",
+    amount: Annotated[int, Field(description="Pixels to scroll")] = 500,
+) -> str:
+    """Scroll the page up or down."""
+    result = await _server.scroll(direction, amount)
+    return json.dumps(result, indent=2)
+
+
+@mcp.tool()
+async def select_option(
+    selector: Annotated[str, Field(description="Select element selector")],
+    value: Annotated[str, Field(description="Option value to select")],
+) -> str:
+    """Select an option from a dropdown."""
+    result = await _server.select_option(selector, value)
+    return json.dumps(result, indent=2)
+
+
+# ---- Extraction Tools ----
+
+@mcp.tool()
+async def get_page_info() -> str:
+    """Get current page URL and title."""
+    result = await _server.get_page_info()
+    return json.dumps(result, indent=2)
+
+
+@mcp.tool()
+async def get_dom_elements(
+    max_elements: Annotated[int, Field(description="Max number of elements to return")] = 50,
+) -> str:
+    """Get interactive elements on the page (links, buttons, inputs). Use this to find selectors for click/fill."""
+    result = await _server.get_dom_elements(max_elements)
+    return json.dumps(result, indent=2)
+
+
+@mcp.tool()
+async def extract_text(
+    selector: Annotated[str, Field(description="CSS selector to match elements")],
+    max_items: Annotated[int, Field(description="Max number of text items")] = 20,
+) -> str:
+    """Extract text content from elements matching a CSS selector."""
+    result = await _server.extract_text(selector, max_items)
+    return json.dumps(result, indent=2)
+
+
+@mcp.tool()
+async def extract_table(
+    selector: Annotated[str, Field(description="Table CSS selector")] = "table",
+) -> str:
+    """Extract table data as structured JSON with column headers as keys."""
+    result = await _server.extract_table(selector)
+    return json.dumps(result, indent=2)
+
+
+# ---- Debugging Tools ----
+
+@mcp.tool()
+async def take_screenshot(
+    full_page: Annotated[bool, Field(description="Capture full scrollable page")] = False,
+) -> str:
+    """Take a screenshot (returns base64 PNG). Use when a click fails to see what is on screen."""
+    result = await _server.take_screenshot(full_page)
+    return json.dumps(result, indent=2)
+
+
+@mcp.tool()
+async def get_action_log() -> str:
+    """Get recent action log for debugging what happened."""
+    result = await _server.get_action_log()
+    return json.dumps(result, indent=2)
+
+
+# ---- Multi-tab Tools ----
+
+@mcp.tool()
+async def new_tab(
+    url: Annotated[Optional[str], Field(description="Optional URL to open in new tab")] = None,
+) -> str:
+    """Open a new browser tab, optionally navigating to a URL."""
+    result = await _server.new_tab(url)
+    return json.dumps(result, indent=2)
+
+
+@mcp.tool()
+async def switch_tab(
+    tab_id: Annotated[int, Field(description="Tab ID to switch to")],
+) -> str:
+    """Switch to a different tab by ID."""
+    result = await _server.switch_tab(tab_id)
+    return json.dumps(result, indent=2)
+
+
+@mcp.tool()
+async def close_tab(
+    tab_id: Annotated[Optional[int], Field(description="Tab ID to close (default: current tab)")] = None,
+) -> str:
+    """Close a tab. Defaults to closing the current active tab."""
+    result = await _server.close_tab(tab_id)
+    return json.dumps(result, indent=2)
+
+
+@mcp.tool()
+async def list_tabs() -> str:
+    """List all open browser tabs with their URLs and titles."""
+    result = await _server.list_tabs()
+    return json.dumps(result, indent=2)
+
+
+# ============ Entry Point ============
 
 def main():
-    """Entry point for MCP server."""
-    asyncio.run(run_mcp_server())
+    """Run MCP server over stdio."""
+    # Suppress print output that could corrupt JSON-RPC messages
+    mcp.run(transport="stdio")
 
 
 if __name__ == "__main__":
