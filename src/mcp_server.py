@@ -149,16 +149,31 @@ class MCPBrowserServer:
         return self._tabs[self._active_tab]
 
     def _log_action(self, tool: str, args: Dict, result: Dict) -> None:
-        """Log action for audit trail."""
+        """Log action for audit trail. Sensitive data is redacted."""
+        # Redact sensitive fields
+        safe_args = {k: "[REDACTED]" if k in ("value", "password", "secret", "token") else v
+                     for k, v in args.items()}
         self._action_log.append({
             "timestamp": datetime.now().isoformat(),
             "tool": tool,
-            "args": args,
+            "args": safe_args,
             "success": result.get("success", False),
         })
         # Keep last 100 actions
         if len(self._action_log) > 100:
             self._action_log = self._action_log[-100:]
+
+    async def _validate_current_url(self, page: Page) -> tuple[bool, str]:
+        """Validate that current page URL is in allowlist. Used after redirects/history nav."""
+        current_url = page.url
+        if current_url in ("about:blank", ""):
+            return True, ""
+        allowed, reason = is_domain_allowed(current_url)
+        if not allowed:
+            # Navigate away from disallowed domain
+            await page.goto("about:blank")
+            return False, f"Navigation blocked: landed on disallowed domain. {reason}"
+        return True, ""
 
     # ---- Navigation ----
 
@@ -166,7 +181,9 @@ class MCPBrowserServer:
         await self.initialize()
         allowed, reason = is_domain_allowed(url)
         if not allowed:
-            return {"success": False, "error": reason}
+            result = {"success": False, "error": reason}
+            self._log_action("browse_to", {"url": url}, result)
+            return result
 
         page = self._get_page()
         if not url.startswith(("http://", "https://")):
@@ -174,11 +191,16 @@ class MCPBrowserServer:
 
         try:
             await page.goto(url, wait_until="domcontentloaded", timeout=30000)
-            result = {
-                "success": True,
-                "url": page.url,
-                "title": await page.title(),
-            }
+            # Validate final URL after potential redirects
+            valid, block_reason = await self._validate_current_url(page)
+            if not valid:
+                result = {"success": False, "error": block_reason}
+            else:
+                result = {
+                    "success": True,
+                    "url": page.url,
+                    "title": await page.title(),
+                }
         except Exception as e:
             result = {"success": False, "error": str(e)}
 
@@ -190,18 +212,32 @@ class MCPBrowserServer:
         page = self._get_page()
         try:
             await page.go_back(wait_until="domcontentloaded", timeout=10000)
-            return {"success": True, "url": page.url}
+            # Validate URL after history navigation
+            valid, block_reason = await self._validate_current_url(page)
+            if not valid:
+                result = {"success": False, "error": block_reason}
+            else:
+                result = {"success": True, "url": page.url}
         except Exception as e:
-            return {"success": False, "error": str(e)}
+            result = {"success": False, "error": str(e)}
+        self._log_action("go_back", {}, result)
+        return result
 
     async def go_forward(self) -> Dict[str, Any]:
         await self.initialize()
         page = self._get_page()
         try:
             await page.go_forward(wait_until="domcontentloaded", timeout=10000)
-            return {"success": True, "url": page.url}
+            # Validate URL after history navigation
+            valid, block_reason = await self._validate_current_url(page)
+            if not valid:
+                result = {"success": False, "error": block_reason}
+            else:
+                result = {"success": True, "url": page.url}
         except Exception as e:
-            return {"success": False, "error": str(e)}
+            result = {"success": False, "error": str(e)}
+        self._log_action("go_forward", {}, result)
+        return result
 
     # ---- Waiting ----
 
@@ -213,15 +249,26 @@ class MCPBrowserServer:
         wait_for_network: bool = False,
     ) -> Dict[str, Any]:
         await self.initialize()
+        # Require at least one wait condition to prevent no-op calls
+        if not selector and not wait_for_network:
+            result = {
+                "success": False,
+                "error": "Must specify either 'selector' or 'wait_for_network=true'. No-op wait rejected.",
+            }
+            self._log_action("wait_for", {"selector": selector, "wait_for_network": wait_for_network}, result)
+            return result
+
         page = self._get_page()
         try:
             if wait_for_network:
                 await page.wait_for_load_state("networkidle", timeout=timeout)
             if selector:
                 await page.wait_for_selector(selector, state=state, timeout=timeout)
-            return {"success": True, "waited_for": selector or "network"}
+            result = {"success": True, "waited_for": selector or "network"}
         except Exception as e:
-            return {"success": False, "error": str(e), "hint": "Element may not exist or page still loading"}
+            result = {"success": False, "error": str(e), "hint": "Element may not exist or page still loading"}
+        self._log_action("wait_for", {"selector": selector, "wait_for_network": wait_for_network}, result)
+        return result
 
     # ---- Interaction ----
 
@@ -235,10 +282,18 @@ class MCPBrowserServer:
                 await page.wait_for_load_state("domcontentloaded", timeout=3000)
             except:
                 pass
+            url_changed = page.url != url_before
+            # Validate URL if navigation occurred (click might have navigated)
+            if url_changed:
+                valid, block_reason = await self._validate_current_url(page)
+                if not valid:
+                    result = {"success": False, "error": block_reason}
+                    self._log_action("click", {"selector": selector}, result)
+                    return result
             result = {
                 "success": True,
                 "url": page.url,
-                "url_changed": page.url != url_before,
+                "url_changed": url_changed,
             }
         except Exception as e:
             result = {
@@ -257,10 +312,11 @@ class MCPBrowserServer:
                 await page.fill(selector, value, timeout=10000)
             else:
                 await page.type(selector, value, timeout=10000)
-            result = {"success": True, "filled": value}
+            result = {"success": True, "filled_length": len(value)}
         except Exception as e:
             result = {"success": False, "error": str(e)}
-        self._log_action("fill", {"selector": selector, "value": value[:50]}, result)
+        # Log with value field - will be auto-redacted by _log_action
+        self._log_action("fill", {"selector": selector, "value": value}, result)
         return result
 
     async def press_key(self, key: str = "Enter") -> Dict[str, Any]:
@@ -273,14 +329,24 @@ class MCPBrowserServer:
                 await page.wait_for_load_state("domcontentloaded", timeout=5000)
             except:
                 pass
-            return {
+            url_changed = page.url != url_before
+            # Validate URL if navigation occurred
+            if url_changed:
+                valid, block_reason = await self._validate_current_url(page)
+                if not valid:
+                    result = {"success": False, "error": block_reason}
+                    self._log_action("press_key", {"key": key}, result)
+                    return result
+            result = {
                 "success": True,
                 "key": key,
                 "url": page.url,
-                "url_changed": page.url != url_before,
+                "url_changed": url_changed,
             }
         except Exception as e:
-            return {"success": False, "error": str(e)}
+            result = {"success": False, "error": str(e)}
+        self._log_action("press_key", {"key": key}, result)
+        return result
 
     async def scroll(self, direction: str = "down", amount: int = 500) -> Dict[str, Any]:
         await self.initialize()
@@ -288,27 +354,33 @@ class MCPBrowserServer:
         delta = amount if direction == "down" else -amount
         await page.evaluate(f"window.scrollBy(0, {delta})")
         scroll_pos = await page.evaluate("window.scrollY")
-        return {"success": True, "direction": direction, "scroll_position": scroll_pos}
+        result = {"success": True, "direction": direction, "scroll_position": scroll_pos}
+        self._log_action("scroll", {"direction": direction, "amount": amount}, result)
+        return result
 
     async def select_option(self, selector: str, value: str) -> Dict[str, Any]:
         await self.initialize()
         page = self._get_page()
         try:
             await page.select_option(selector, value, timeout=10000)
-            return {"success": True, "selected": value}
+            result = {"success": True, "selected": value}
         except Exception as e:
-            return {"success": False, "error": str(e)}
+            result = {"success": False, "error": str(e)}
+        self._log_action("select_option", {"selector": selector, "value": value}, result)
+        return result
 
     # ---- Extraction ----
 
     async def get_page_info(self) -> Dict[str, Any]:
         await self.initialize()
         page = self._get_page()
-        return {
+        result = {
             "url": page.url,
             "title": await page.title(),
             "tab_id": self._active_tab,
         }
+        self._log_action("get_page_info", {}, {"success": True})
+        return result
 
     async def get_dom_elements(self, max_elements: int = 50) -> Dict[str, Any]:
         await self.initialize()
@@ -348,6 +420,7 @@ class MCPBrowserServer:
                 elements: elements.slice(0, maxElements),
             };
         }""", max_elements)
+        self._log_action("get_dom_elements", {"max_elements": max_elements}, {"success": True, "count": dom_data.get("element_count", 0)})
         return dom_data
 
     async def extract_text(self, selector: str, max_items: int = 20) -> Dict[str, Any]:
@@ -360,9 +433,11 @@ class MCPBrowserServer:
                 text = await el.text_content()
                 if text and text.strip():
                     texts.append(text.strip())
-            return {"success": True, "selector": selector, "count": len(texts), "texts": texts}
+            result = {"success": True, "selector": selector, "count": len(texts), "texts": texts}
         except Exception as e:
-            return {"success": False, "error": str(e)}
+            result = {"success": False, "error": str(e)}
+        self._log_action("extract_text", {"selector": selector, "max_items": max_items}, result)
+        return result
 
     async def extract_table(self, selector: str = "table") -> Dict[str, Any]:
         await self.initialize()
@@ -394,10 +469,13 @@ class MCPBrowserServer:
                 return { headers: headers, row_count: rows.length, rows: rows };
             }""", selector)
             if "error" in table_data:
-                return {"success": False, "error": table_data["error"]}
-            return {"success": True, **table_data}
+                result = {"success": False, "error": table_data["error"]}
+            else:
+                result = {"success": True, **table_data}
         except Exception as e:
-            return {"success": False, "error": str(e)}
+            result = {"success": False, "error": str(e)}
+        self._log_action("extract_table", {"selector": selector}, result)
+        return result
 
     # ---- Debugging ----
 
@@ -407,14 +485,16 @@ class MCPBrowserServer:
         try:
             screenshot_bytes = await page.screenshot(type="png", full_page=full_page)
             screenshot_b64 = base64.b64encode(screenshot_bytes).decode("utf-8")
-            return {
+            result = {
                 "success": True,
                 "format": "png",
                 "base64": screenshot_b64,
                 "url": page.url,
             }
         except Exception as e:
-            return {"success": False, "error": str(e)}
+            result = {"success": False, "error": str(e)}
+        self._log_action("take_screenshot", {"full_page": full_page}, {"success": result.get("success", False)})
+        return result
 
     async def get_action_log(self) -> Dict[str, Any]:
         return {
@@ -429,39 +509,66 @@ class MCPBrowserServer:
         if url:
             allowed, reason = is_domain_allowed(url)
             if not allowed:
-                return {"success": False, "error": reason}
+                result = {"success": False, "error": reason}
+                self._log_action("new_tab", {"url": url}, result)
+                return result
 
-        page = await self._context.new_page()
-        tab_id = max(self._tabs.keys()) + 1
-        self._tabs[tab_id] = page
-        self._active_tab = tab_id
+        try:
+            page = await self._context.new_page()
+            tab_id = max(self._tabs.keys()) + 1
+            self._tabs[tab_id] = page
+            self._active_tab = tab_id
 
-        if url:
-            if not url.startswith(("http://", "https://")):
-                url = f"https://{url}"
-            await page.goto(url, wait_until="domcontentloaded", timeout=30000)
+            if url:
+                if not url.startswith(("http://", "https://")):
+                    url = f"https://{url}"
+                await page.goto(url, wait_until="domcontentloaded", timeout=30000)
+                # Validate final URL after potential redirects
+                valid, block_reason = await self._validate_current_url(page)
+                if not valid:
+                    # Close the tab we just created since navigation was blocked
+                    await page.close()
+                    del self._tabs[tab_id]
+                    self._active_tab = list(self._tabs.keys())[0] if self._tabs else 0
+                    result = {"success": False, "error": block_reason}
+                    self._log_action("new_tab", {"url": url}, result)
+                    return result
 
-        return {"success": True, "tab_id": tab_id, "url": page.url if url else "about:blank"}
+            result = {"success": True, "tab_id": tab_id, "url": page.url if url else "about:blank"}
+        except Exception as e:
+            result = {"success": False, "error": str(e)}
+        self._log_action("new_tab", {"url": url}, result)
+        return result
 
     async def switch_tab(self, tab_id: int) -> Dict[str, Any]:
         if tab_id not in self._tabs:
-            return {"success": False, "error": f"Tab {tab_id} not found"}
+            result = {"success": False, "error": f"Tab {tab_id} not found"}
+            self._log_action("switch_tab", {"tab_id": tab_id}, result)
+            return result
         self._active_tab = tab_id
         page = self._tabs[tab_id]
         await page.bring_to_front()
-        return {"success": True, "tab_id": tab_id, "url": page.url}
+        result = {"success": True, "tab_id": tab_id, "url": page.url}
+        self._log_action("switch_tab", {"tab_id": tab_id}, result)
+        return result
 
     async def close_tab(self, tab_id: Optional[int] = None) -> Dict[str, Any]:
         tab_to_close = tab_id if tab_id is not None else self._active_tab
         if tab_to_close not in self._tabs:
-            return {"success": False, "error": f"Tab {tab_to_close} not found"}
+            result = {"success": False, "error": f"Tab {tab_to_close} not found"}
+            self._log_action("close_tab", {"tab_id": tab_to_close}, result)
+            return result
         if len(self._tabs) <= 1:
-            return {"success": False, "error": "Cannot close last tab"}
+            result = {"success": False, "error": "Cannot close last tab"}
+            self._log_action("close_tab", {"tab_id": tab_to_close}, result)
+            return result
         await self._tabs[tab_to_close].close()
         del self._tabs[tab_to_close]
         if self._active_tab == tab_to_close:
             self._active_tab = list(self._tabs.keys())[0]
-        return {"success": True, "closed_tab": tab_to_close, "active_tab": self._active_tab}
+        result = {"success": True, "closed_tab": tab_to_close, "active_tab": self._active_tab}
+        self._log_action("close_tab", {"tab_id": tab_to_close}, result)
+        return result
 
     async def list_tabs(self) -> Dict[str, Any]:
         tabs_info = []
@@ -472,7 +579,9 @@ class MCPBrowserServer:
                 "title": await page.title(),
                 "active": tab_id == self._active_tab,
             })
-        return {"tabs": tabs_info, "active_tab": self._active_tab}
+        result = {"tabs": tabs_info, "active_tab": self._active_tab}
+        self._log_action("list_tabs", {}, {"success": True, "count": len(tabs_info)})
+        return result
 
 
 # ============ FastMCP Server (Official SDK) ============
